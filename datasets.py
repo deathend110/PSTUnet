@@ -88,11 +88,11 @@ class SARDataset(Dataset):
 # ==========================================
 if __name__ == '__main__':
     # 假设你的数据集根目录是这个
-    base_dir = r'G:\MATLAB-G\SAR Full PSF\Sequence_Dataset_mixrate_1-1_1.8'
+    base_dir = r'G:\VSCODE-G\PST_Dataset'
     
     # 测试能否正常实例化
     try:
-        train_dataset = SARDataset(base_dir=base_dir, domain='DB', mode='test', max_val=255.0)
+        train_dataset = SARDataset(base_dir=base_dir, domain='DB', mode='train', max_val=255.0)
         
         print(f"✅ 成功加载数据集，共找到 {len(train_dataset)} 个序列切片。")
         

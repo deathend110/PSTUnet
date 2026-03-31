@@ -60,10 +60,10 @@ NUM_EPOCHS=40
 # Early stopping patience.
 # With the current train.py this now controls stop behavior only,
 # and no longer triggers ad-hoc LR decay.
-PATIENCE=10
+PATIENCE=20
 
-# TV loss weight.
-TV_WEIGHT=1e-3
+# TV loss weight.补齐utils里面 /batchsize 的缩小
+TV_WEIGHT=2e-3
 
 # SSIM loss weight used after the SSIM stage starts.
 # In the current train.py, SSIM is enabled from epoch 26 onward.

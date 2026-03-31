@@ -174,39 +174,50 @@ class QAG_PST_Fusion_Cell(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-    def forward(self, x_curr, h_prev, conf_curr, conf_prev):
+    def forward(self, x_curr, x_prev, h_prev, conf_curr, conf_prev):
         B, C, H, W = x_curr.shape
         if h_prev is None:
+            # 初始时刻无历史记忆，直接拿全零替代
             return self.fusion_conv(torch.cat([x_curr, torch.zeros_like(x_curr)], dim=1))
 
         q_diff_val = conf_prev - conf_curr 
         
         if self.shift == 0:
-            valid_x, valid_h = x_curr, h_prev
+            valid_x_curr = x_curr
+            valid_x_prev = x_prev
+            valid_h_prev = h_prev
             q_diff_map = q_diff_val.view(B, 1, 1, 1).expand(B, 1, H, W)
         elif self.direction == 'forward':
-            valid_x = x_curr[:, :, :, 0 : W - self.shift]
-            valid_h = h_prev[:, :, :, self.shift : W]
+            valid_x_curr = x_curr[:, :, :, 0 : W - self.shift]
+            valid_x_prev = x_prev[:, :, :, self.shift : W]
+            valid_h_prev = h_prev[:, :, :, self.shift : W]
             q_diff_map = q_diff_val.view(B, 1, 1, 1).expand(B, 1, H, W - self.shift)
         else: # backward
-            valid_x = x_curr[:, :, :, self.shift : W]
-            valid_h = h_prev[:, :, :, 0 : W - self.shift]
+            valid_x_curr = x_curr[:, :, :, self.shift : W]
+            valid_x_prev = x_prev[:, :, :, 0 : W - self.shift]
+            valid_h_prev = h_prev[:, :, :, 0 : W - self.shift]
             q_diff_map = q_diff_val.view(B, 1, 1, 1).expand(B, 1, H, W - self.shift)
 
-        feat_diff = torch.abs(valid_h - valid_x)
+        # 【核心修正】在同一个原始物理空间特征内寻找变化（找茬），生成物理变化特征图
+        feat_diff = torch.abs(valid_x_prev - valid_x_curr)
+        
+        # 将物理变化与置信度变化结合，生成软门控
         soft_gate = self.gate_conv(torch.cat([feat_diff, q_diff_map], dim=1)) 
-        valid_h_filtered = valid_h * soft_gate
+        
+        # 用门控去过滤高度抽象的历史记忆
+        valid_h_filtered = valid_h_prev * soft_gate
 
         if self.shift == 0:
             h_aligned = valid_h_filtered
         elif self.direction == 'forward':
             # 填充格式为 (pad_left, pad_right, pad_top, pad_bottom)
-            # 填补右侧缺失的像素
+            # 填补右侧缺失的像素（新进入视野的区域没有任何记忆，自然填 0）
             h_aligned = F.pad(valid_h_filtered, (0, self.shift, 0, 0)) 
         else:
             # 填补左侧缺失的像素
             h_aligned = F.pad(valid_h_filtered, (self.shift, 0, 0, 0))
 
+        # 将当前特征与过滤后的历史记忆进行终极融合
         return self.fusion_conv(torch.cat([x_curr, h_aligned], dim=1))
 
 class Bi_QAG_PST_Sequence(nn.Module):
@@ -216,16 +227,27 @@ class Bi_QAG_PST_Sequence(nn.Module):
         self.forward_cell = QAG_PST_Fusion_Cell(channels, shift_pixels, 'forward')
         self.backward_cell = QAG_PST_Fusion_Cell(channels, shift_pixels, 'backward')
         self.fusion = nn.Conv2d(channels * 2, channels, kernel_size=1)
+        
+        # [Critical Fix] Zero-initialize the fusion layer.
+        # This ensures that at the start of training, the Bi_QAG_PST module acts as an identity mapping 
+        # (base + 0 = base), meaning it will not perform worse than the baseline model.
+        nn.init.constant_(self.fusion.weight, 0)
+        if self.fusion.bias is not None:
+            nn.init.constant_(self.fusion.bias, 0)
 
     def forward(self, x_seq, conf_seq):
         B, T, C, H, W = x_seq.shape
         base = x_seq
+        
         h_f = None
         out_f = []
         for t in range(T):
             c_curr = conf_seq[:, t] 
             c_prev = conf_seq[:, t-1] if t > 0 else c_curr 
-            h_f = self.forward_cell(x_seq[:, t], h_f, c_curr, c_prev)
+            x_curr = x_seq[:, t]
+            x_prev = x_seq[:, t-1] if t > 0 else x_curr
+            
+            h_f = self.forward_cell(x_curr, x_prev, h_f, c_curr, c_prev)
             out_f.append(h_f)
             
         h_b = None
@@ -233,7 +255,10 @@ class Bi_QAG_PST_Sequence(nn.Module):
         for t in range(T - 1, -1, -1):
             c_curr = conf_seq[:, t]
             c_prev_for_backward = conf_seq[:, t+1] if t < T - 1 else c_curr 
-            h_b = self.backward_cell(x_seq[:, t], h_b, c_curr, c_prev_for_backward)
+            x_curr = x_seq[:, t]
+            x_prev_for_backward = x_seq[:, t+1] if t < T - 1 else x_curr
+            
+            h_b = self.backward_cell(x_curr, x_prev_for_backward, h_b, c_curr, c_prev_for_backward)
             out_b.append(h_b)
         out_b.reverse() # O(N) 且高效，或者使用 out_b = out_b[::-1]
             

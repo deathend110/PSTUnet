@@ -410,6 +410,12 @@ def main():
                     loss = loss.mean()
 
             scaler.scale(loss).backward()
+            
+            # [Critical Fix] Unscale the gradients and apply gradient clipping
+            # Recurrent structures like Bi_QAG_PST are highly prone to gradient explosion, especially with a 9x larger dataset
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), max_norm=1.0)
+            
             scaler.step(optimizer)
             scaler.update()
 

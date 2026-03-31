@@ -79,6 +79,43 @@ def save_history_mat(path, key, values):
     scipy.io.savemat(path, mdict={key: values})
 
 
+def set_optimizer_lr(optimizer, lr):
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+
+
+def get_epoch_schedule(epoch_index, base_lr, ssim_weight):
+    epoch_id = epoch_index + 1
+
+    if epoch_id <= 15:
+        return {
+            "stage_name": "WarmupAndBaseFit",
+            "phase_desc": "[L1+TV | LR=1e-4 | Epoch 1-15]",
+            "lr": base_lr,
+            "ssim_weight": 0.0,
+        }
+    if epoch_id <= 25:
+        return {
+            "stage_name": "StructureStabilize",
+            "phase_desc": "[L1+TV | LR=5e-5 | Epoch 16-25]",
+            "lr": base_lr * 0.5,
+            "ssim_weight": 0.0,
+        }
+    if epoch_id <= 35:
+        return {
+            "stage_name": "PerceptualFinetune",
+            "phase_desc": "[L1+TV+SSIM | LR=1e-5 | Epoch 26-35]",
+            "lr": base_lr * 0.1,
+            "ssim_weight": ssim_weight,
+        }
+    return {
+        "stage_name": "ExtremeConverge",
+        "phase_desc": "[L1+TV+SSIM | LR=1e-6 | Epoch 36+]",
+        "lr": base_lr * 0.01,
+        "ssim_weight": ssim_weight,
+    }
+
+
 def is_dist_initialized():
     return dist.is_available() and dist.is_initialized()
 
@@ -210,6 +247,7 @@ def main():
     parser.add_argument("--outputs-dir", type=str, default="./output/")
     parser.add_argument("--tv-weight", type=float, default=1e-3)
     parser.add_argument("--ssim-weight", type=float, default=0.2)
+    parser.add_argument("--score-ssim-scale", type=float, default=50.0)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
         "--batch-size",
@@ -217,7 +255,7 @@ def main():
         default=2,
         help="Per-process batch size. Under DDP, global batch size = batch-size * WORLD_SIZE.",
     )
-    parser.add_argument("--num-epochs", type=int, default=80)
+    parser.add_argument("--num-epochs", type=int, default=35)
     parser.add_argument("--patience", type=int, default=15)
     args = parser.parse_args()
 
@@ -292,13 +330,12 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     ssim_calculator = SSIMLoss().to(device)
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    base_lr = args.lr
+    optimizer = optim.AdamW(model.parameters(), lr=base_lr, weight_decay=1e-4)
 
     early_stopping = EarlyStopping(args.patience, verbose=False)
     model_save_path = os.path.join(args.outputs_dir, "best_early_stopping.pth")
     early_stopping.path = model_save_path
-    trig = 0
-
     dataloader_kwargs = {
         "num_workers": args.num_workers,
         "pin_memory": use_cuda,
@@ -348,12 +385,10 @@ def main():
             train_sampler.set_epoch(epoch)
 
         wrapper_module = unwrap_model(wrapped_model)
-        if epoch < 40:
-            wrapper_module.criterion.ssim_weight = 0.0
-            phase_desc = "[L1+TV | Val: PSNR]"
-        else:
-            wrapper_module.criterion.ssim_weight = args.ssim_weight
-            phase_desc = "[L1+TV+SSIM | Val: PSNR+SSIM]"
+        schedule = get_epoch_schedule(epoch, base_lr, args.ssim_weight)
+        wrapper_module.criterion.ssim_weight = schedule["ssim_weight"]
+        set_optimizer_lr(optimizer, schedule["lr"])
+        phase_desc = schedule["phase_desc"]
 
         wrapped_model.train()
         epoch_losses = AverageMeter()
@@ -416,12 +451,12 @@ def main():
         epoch_psnr_avg = reduce_average(epoch_psnr.sum, epoch_psnr.count, device)
         epoch_ssim_avg = reduce_average(epoch_ssim.sum, epoch_ssim.count, device)
 
-        if epoch < 40:
+        if schedule["ssim_weight"] == 0.0:
             current_score = epoch_psnr_avg
         else:
-            current_score = epoch_psnr_avg + (epoch_ssim_avg * 100.0)
+            current_score = epoch_psnr_avg + (epoch_ssim_avg * args.score_ssim_scale)
 
-        control_flags = [0, 0]
+        should_stop = [0]
         if is_main_process():
             loss_avg.append(train_loss_avg)
             psnr_avg.append(epoch_psnr_avg)
@@ -443,22 +478,16 @@ def main():
 
             early_stopping(-current_score, model)
             if early_stopping.early_stop:
-                trig += 1
-                next_lr = args.lr / 10
-                logger.warning(f"Early stopping triggered (trigger={trig}). Reduce lr to {next_lr}.")
-                control_flags[0] = 1
-                if trig > 1:
-                    logger.error("Learning rate already decayed once and early stopping triggered again. Stop training.")
-                    control_flags[1] = 1
-                else:
-                    early_stopping.early_stop = False
-                    early_stopping.counter = 0
+                logger.warning("Early stopping triggered. Stop training with the current staged LR schedule.")
+                should_stop[0] = 1
 
             te = time.time()
             logger.info(
-                "Epoch [{}/{}] | train loss: {:.6f} | eval psnr: {:.2f} | eval ssim: {:.4f} | score: {:.2f} | Time: {:.2f}s".format(
+                "Epoch [{}/{}] | stage: {} | lr: {:.2e} | train loss: {:.6f} | eval psnr: {:.2f} | eval ssim: {:.4f} | score: {:.2f} | Time: {:.2f}s".format(
                     epoch,
                     args.num_epochs - 1,
+                    schedule["stage_name"],
+                    schedule["lr"],
                     train_loss_avg,
                     epoch_psnr_avg,
                     epoch_ssim_avg,
@@ -467,17 +496,9 @@ def main():
                 )
             )
 
-        control_flags = broadcast_flags(control_flags, device if use_cuda else torch.device("cpu"))
+        should_stop = broadcast_flags(should_stop, device if use_cuda else torch.device("cpu"))
 
-        if control_flags[0] == 1:
-            args.lr = args.lr / 10
-            maybe_barrier()
-            checkpoint = torch.load(model_save_path, map_location=device)
-            model.load_state_dict(checkpoint)
-            optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-            maybe_barrier()
-
-        if control_flags[1] == 1:
+        if should_stop[0] == 1:
             break
 
     if is_main_process():

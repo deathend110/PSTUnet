@@ -219,7 +219,7 @@ class Bi_QAG_PST_Sequence(nn.Module):
 
     def forward(self, x_seq, conf_seq):
         B, T, C, H, W = x_seq.shape
-        
+        base = x_seq
         h_f = None
         out_f = []
         for t in range(T):
@@ -242,7 +242,7 @@ class Bi_QAG_PST_Sequence(nn.Module):
             combined = torch.cat([out_f[t], out_b[t]], dim=1)
             out.append(self.fusion(combined))
             
-        return torch.stack(out, dim=1)
+        return base + torch.stack(out, dim=1)
 
 # ==========================================
 # 终极完全体：PST_UNet 整体架构

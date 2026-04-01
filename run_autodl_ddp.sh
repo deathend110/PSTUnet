@@ -82,6 +82,11 @@ MAX_VAL=255.0
 # Number of DDP processes, usually equal to the number of GPUs used.
 NPROC_PER_NODE=2
 
+# Number of steps to accumulate gradients.
+# To match the baseline effective batch size of 8 using 2 GPUs (batch_size=1):
+# GLOBAL_BATCH_SIZE = BATCH_SIZE(1) * NPROC_PER_NODE(2) * GRAD_ACCUM_STEPS(4) = 8
+GRAD_ACCUM_STEPS=4
+
 # Limit OpenMP CPU threads to avoid oversubscription.
 export OMP_NUM_THREADS=4
 
@@ -95,7 +100,8 @@ echo "DOMAIN=${DOMAIN}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
 echo "PER_GPU_BATCH_SIZE=${BATCH_SIZE}"
-echo "GLOBAL_BATCH_SIZE=$((BATCH_SIZE * NPROC_PER_NODE))"
+echo "GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS}"
+echo "GLOBAL_BATCH_SIZE=$((BATCH_SIZE * NPROC_PER_NODE * GRAD_ACCUM_STEPS))"
 echo "BASE_LR=${LR}"
 echo "NUM_EPOCHS=${NUM_EPOCHS}"
 echo "SSIM_WEIGHT=${SSIM_WEIGHT}"
@@ -109,6 +115,7 @@ torchrun \
   --domain "${DOMAIN}" \
   --outputs-dir "${OUTPUTS_DIR}" \
   --batch-size "${BATCH_SIZE}" \
+  --grad-accum-steps "${GRAD_ACCUM_STEPS}" \
   --num-workers "${NUM_WORKERS}" \
   --lr "${LR}" \
   --num-epochs "${NUM_EPOCHS}" \

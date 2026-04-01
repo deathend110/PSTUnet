@@ -257,6 +257,12 @@ def main():
     )
     parser.add_argument("--num-epochs", type=int, default=35)
     parser.add_argument("--patience", type=int, default=15)
+    parser.add_argument(
+        "--grad-accum-steps",
+        type=int,
+        default=4,
+        help="Number of steps to accumulate gradients before updating. Global Batch Size = batch-size * WORLD_SIZE * grad-accum-steps.",
+    )
     args = parser.parse_args()
 
     runtime = init_runtime(args)
@@ -398,26 +404,36 @@ def main():
             progress = tqdm(total=len(train_dataloader) * args.batch_size)
             progress.set_description(f"epoch: {epoch}/{args.num_epochs - 1} {phase_desc}")
 
-        for inputs, targets in train_dataloader:
+        optimizer.zero_grad(set_to_none=True)
+
+        for i, (inputs, targets) in enumerate(train_dataloader):
             inputs = inputs.to(device, non_blocking=use_cuda)
             targets = targets.to(device, non_blocking=use_cuda)
 
-            optimizer.zero_grad(set_to_none=True)
-
-            with autocast_context():
-                loss = wrapped_model(inputs, targets)
-                if loss.ndim > 0:
-                    loss = loss.mean()
-
-            scaler.scale(loss).backward()
+            is_accumulating = (i + 1) % args.grad_accum_steps != 0 and (i + 1) != len(train_dataloader)
             
-            # [Critical Fix] Unscale the gradients and apply gradient clipping
-            # Recurrent structures like Bi_QAG_PST are highly prone to gradient explosion, especially with a 9x larger dataset
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), max_norm=1.0)
+            # 使用 DDP no_sync 避免在累加步骤中执行多余的跨卡通信
+            context = wrapped_model.no_sync() if (is_accumulating and distributed) else nullcontext()
             
-            scaler.step(optimizer)
-            scaler.update()
+            with context:
+                with autocast_context():
+                    loss = wrapped_model(inputs, targets)
+                    if loss.ndim > 0:
+                        loss = loss.mean()
+                    # 对 loss 进行平均缩放，使累加后的梯度量级保持一致
+                    scaled_loss = loss / args.grad_accum_steps
+
+                scaler.scale(scaled_loss).backward()
+            
+            # 当达到累加步数或者是最后一个 batch 时，执行参数更新
+            if not is_accumulating:
+                # [Critical Fix] Unscale the gradients and apply relaxed gradient clipping (5.0)
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), max_norm=5.0)
+                
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
 
             epoch_losses.update(loss.item(), inputs.size(0))
             if progress is not None:

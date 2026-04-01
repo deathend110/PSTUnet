@@ -116,6 +116,14 @@ def get_epoch_schedule(epoch_index, base_lr, ssim_weight):
     }
 
 
+def compute_validation_score(psnr_value, ssim_value, ssim_scale):
+    """
+    Keep validation selection criteria fixed across the whole run so checkpoint
+    comparison and early stopping do not change when the training loss changes.
+    """
+    return psnr_value + (ssim_value * ssim_scale)
+
+
 def is_dist_initialized():
     return dist.is_available() and dist.is_initialized()
 
@@ -473,10 +481,11 @@ def main():
         epoch_psnr_avg = reduce_average(epoch_psnr.sum, epoch_psnr.count, device)
         epoch_ssim_avg = reduce_average(epoch_ssim.sum, epoch_ssim.count, device)
 
-        if schedule["ssim_weight"] == 0.0:
-            current_score = epoch_psnr_avg
-        else:
-            current_score = epoch_psnr_avg + (epoch_ssim_avg * args.score_ssim_scale)
+        current_score = compute_validation_score(
+            psnr_value=epoch_psnr_avg,
+            ssim_value=epoch_ssim_avg,
+            ssim_scale=args.score_ssim_scale,
+        )
 
         should_stop = [0]
         if is_main_process():

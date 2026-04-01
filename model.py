@@ -228,9 +228,8 @@ class Bi_QAG_PST_Sequence(nn.Module):
         self.backward_cell = QAG_PST_Fusion_Cell(channels, shift_pixels, 'backward')
         self.fusion = nn.Conv2d(channels * 2, channels, kernel_size=1)
         
-        # [Critical Fix] Zero-initialize the fusion layer.
-        # This ensures that at the start of training, the Bi_QAG_PST module acts as an identity mapping 
-        # (base + 0 = base), meaning it will not perform worse than the baseline model.
+        # 【关键修复】对融合层进行零初始化。
+        # 这样做能确保在训练之初，Bi_QAG_PST 模块充当的是恒等映射（基础模型 + 0 = 基础模型），也就是说，它不会比基准模型表现更差。
         nn.init.constant_(self.fusion.weight, 0)
         if self.fusion.bias is not None:
             nn.init.constant_(self.fusion.bias, 0)

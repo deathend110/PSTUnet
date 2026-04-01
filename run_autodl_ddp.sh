@@ -84,8 +84,8 @@ NPROC_PER_NODE=2
 
 # Number of steps to accumulate gradients.
 # To match the baseline effective batch size of 8 using 2 GPUs (batch_size=1):
-# GLOBAL_BATCH_SIZE = BATCH_SIZE(1) * NPROC_PER_NODE(2) * GRAD_ACCUM_STEPS(4) = 8
-GRAD_ACCUM_STEPS=4
+# GLOBAL_BATCH_SIZE = BATCH_SIZE(1) * NPROC_PER_NODE(2) * GRAD_ACCUM_STEPS(1) = 2
+GRAD_ACCUM_STEPS=1
 
 # Limit OpenMP CPU threads to avoid oversubscription.
 export OMP_NUM_THREADS=4

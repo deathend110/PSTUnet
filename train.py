@@ -435,9 +435,10 @@ def main():
             
             # 当达到累加步数或者是最后一个 batch 时，执行参数更新
             if not is_accumulating:
-                # [Critical Fix] Unscale the gradients and apply relaxed gradient clipping (5.0)
+                # [Critical Fix] 恢复极其严格的梯度裁剪 (1.0)
+                # 时序循环 16 步极易产生梯度尖峰，放宽裁剪会导致 AdamW 的方差项被尖峰撑爆，彻底扼杀有效学习率！
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), max_norm=5.0)
+                torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), max_norm=1.0)
                 
                 scaler.step(optimizer)
                 scaler.update()

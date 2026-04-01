@@ -174,7 +174,7 @@ class QAG_PST_Fusion_Cell(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-    def forward(self, x_curr, x_prev, h_prev, conf_curr, conf_prev):
+    def forward(self, x_curr, h_prev, conf_curr, conf_prev):
         B, C, H, W = x_curr.shape
         if h_prev is None:
             # 初始时刻无历史记忆，直接拿全零替代
@@ -184,22 +184,22 @@ class QAG_PST_Fusion_Cell(nn.Module):
         
         if self.shift == 0:
             valid_x_curr = x_curr
-            valid_x_prev = x_prev
             valid_h_prev = h_prev
             q_diff_map = q_diff_val.view(B, 1, 1, 1).expand(B, 1, H, W)
         elif self.direction == 'forward':
             valid_x_curr = x_curr[:, :, :, 0 : W - self.shift]
-            valid_x_prev = x_prev[:, :, :, self.shift : W]
             valid_h_prev = h_prev[:, :, :, self.shift : W]
             q_diff_map = q_diff_val.view(B, 1, 1, 1).expand(B, 1, H, W - self.shift)
         else: # backward
             valid_x_curr = x_curr[:, :, :, self.shift : W]
-            valid_x_prev = x_prev[:, :, :, 0 : W - self.shift]
             valid_h_prev = h_prev[:, :, :, 0 : W - self.shift]
             q_diff_map = q_diff_val.view(B, 1, 1, 1).expand(B, 1, H, W - self.shift)
 
-        # 【核心修正】在同一个原始物理空间特征内寻找变化（找茬），生成物理变化特征图
-        feat_diff = torch.abs(valid_x_prev - valid_x_curr)
+        # 【神来之笔：恢复基于时序平滑特征的门控逻辑】
+        # 虽然 h_prev 和 x_curr 在数学维度上经历了不同的卷积映射，
+        # 但 h_prev 是包含了过去多帧信息的“时间平滑态”，极大过滤了 SAR 图像的剧烈散斑噪声 (Speckle)。
+        # 拿平滑的 h_prev 去对比充满噪声的 x_curr，能为门控提供远比 x_prev 稳定的时序参考锚点！
+        feat_diff = torch.abs(valid_h_prev - valid_x_curr)
         
         # 将物理变化与置信度变化结合，生成软门控
         soft_gate = self.gate_conv(torch.cat([feat_diff, q_diff_map], dim=1)) 
@@ -245,9 +245,8 @@ class Bi_QAG_PST_Sequence(nn.Module):
             c_curr = conf_seq[:, t] 
             c_prev = conf_seq[:, t-1] if t > 0 else c_curr 
             x_curr = x_seq[:, t]
-            x_prev = x_seq[:, t-1] if t > 0 else x_curr
             
-            h_f = self.forward_cell(x_curr, x_prev, h_f, c_curr, c_prev)
+            h_f = self.forward_cell(x_curr, h_f, c_curr, c_prev)
             out_f.append(h_f)
             
         h_b = None
@@ -256,9 +255,8 @@ class Bi_QAG_PST_Sequence(nn.Module):
             c_curr = conf_seq[:, t]
             c_prev_for_backward = conf_seq[:, t+1] if t < T - 1 else c_curr 
             x_curr = x_seq[:, t]
-            x_prev_for_backward = x_seq[:, t+1] if t < T - 1 else x_curr
             
-            h_b = self.backward_cell(x_curr, x_prev_for_backward, h_b, c_curr, c_prev_for_backward)
+            h_b = self.backward_cell(x_curr, h_b, c_curr, c_prev_for_backward)
             out_b.append(h_b)
         out_b.reverse() # O(N) 且高效，或者使用 out_b = out_b[::-1]
             

@@ -22,12 +22,11 @@ from model import PST_UNet
 from utils import SSIMLoss, calc_psnr
 
 
-class DualDomainInferenceDataset(Dataset):
+class DBInferenceDataset(Dataset):
     def __init__(self, base_dir, max_val=255.0, num_samples=None, seed=42):
         self.base_dir = base_dir
         self.max_val = max_val
         self.db_dir = os.path.join(base_dir, "DB", "testdata")
-        self.linear_dir = os.path.join(base_dir, "Linear", "testdata")
         all_db_paths = sorted(glob.glob(os.path.join(self.db_dir, "*.mat")))
 
         if num_samples is not None:
@@ -84,11 +83,6 @@ class DualDomainInferenceDataset(Dataset):
     def __getitem__(self, idx):
         db_path = self.db_paths[idx]
         db_name = os.path.basename(db_path)
-        linear_name = db_name.replace("_DB_seq_", "_L_seq_")
-        linear_path = os.path.join(self.linear_dir, linear_name)
-
-        if linear_name == db_name or not os.path.exists(linear_path):
-            raise FileNotFoundError(f"Missing paired Linear file for {db_name}: {linear_path}")
 
         with h5py.File(db_path, "r") as f_db:
             seq_input_db_raw = np.array(f_db["/seq_input"]).astype(np.float32)
@@ -103,39 +97,26 @@ class DualDomainInferenceDataset(Dataset):
         input_tensor = np.stack([seq_input_db, prompt_mask], axis=0).astype(np.float32)
         target_tensor = seq_gt_db[np.newaxis, :, :, :].astype(np.float32)
 
-        mat_input_db = seq_input_db.transpose(1, 2, 0).astype(np.float32)
-        mat_gt_db = seq_gt_db.transpose(1, 2, 0).astype(np.float32)
-
-        with h5py.File(linear_path, "r") as f_linear:
-            seq_input_linear_raw = np.array(f_linear["/seq_input_L"]).astype(np.float32)
-            seq_gt_linear_raw = np.array(f_linear["/seq_GT_L"]).astype(np.float32)
-
-        mat_input_linear = seq_input_linear_raw.transpose(2, 1, 0).astype(np.float32)
-        mat_gt_linear = seq_gt_linear_raw.transpose(2, 1, 0).astype(np.float32)
-
-        return (
-            torch.from_numpy(input_tensor),
-            torch.from_numpy(target_tensor),
-            torch.from_numpy(mat_input_db),
-            torch.from_numpy(mat_gt_db),
-            torch.from_numpy(mat_input_linear),
-            torch.from_numpy(mat_gt_linear),
-            db_name,
-        )
+        return torch.from_numpy(input_tensor), torch.from_numpy(target_tensor), db_name
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="PST-UNet dual-domain inference script")
+    parser = argparse.ArgumentParser(description="PST-UNet DB-only inference script for Linux")
     default_checkpoint = (
         "./output/Model(PST_UNet)-Dataset(PST_Dataset)-Loss"
         "(L1+TV+DynSSIM+tv0.002000)-Epochs40-Batch_size1-lr0.000100/best.pth"
     )
     parser.add_argument("--checkpoint", type=str, default=default_checkpoint, help="Path to a model state_dict checkpoint.")
-    parser.add_argument("--base-dir", type=str, default=r"G:\VSCODE-G\PST_Dataset")
-    parser.add_argument("--output-dir", type=str, default="./inference_output/db_test_sample")
+    parser.add_argument("--base-dir", type=str, default="/root/autodl-tmp/PST_Dataset")
+    parser.add_argument("--output-dir", type=str, default="./inference_output/db_test")
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--num-workers", type=int, default=1)
-    parser.add_argument("--num-samples", type=int, default=8, help="Randomly sample N DB test files for inference.")
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=None,
+        help="Randomly sample N DB test files for inference. If not set, infer all DB test files.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed used when --num-samples is provided.")
     parser.add_argument("--max-val", type=float, default=255.0)
     parser.add_argument("--device", type=str, default="cuda", help='Examples: "cuda", "cuda:0", "cpu"')
@@ -183,7 +164,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     predictions_dir = Path(args.output_dir) / "predictions"
 
-    dataset = DualDomainInferenceDataset(
+    dataset = DBInferenceDataset(
         base_dir=args.base_dir,
         max_val=args.max_val,
         num_samples=args.num_samples,
@@ -219,15 +200,7 @@ def main():
     with torch.no_grad():
         progress = tqdm(dataloader, desc="Infer", total=len(dataloader))
         for batch_idx, batch in enumerate(progress):
-            (
-                inputs,
-                targets,
-                mat_input_db_batch,
-                mat_gt_db_batch,
-                mat_input_linear_batch,
-                mat_gt_linear_batch,
-                file_names,
-            ) = batch
+            inputs, targets, file_names = batch
 
             inputs = inputs.to(device, non_blocking=use_cuda)
             targets = targets.to(device, non_blocking=use_cuda)
@@ -270,14 +243,7 @@ def main():
                 )
 
                 mat_pred_db = outputs_cpu[local_idx, 0].numpy().transpose(1, 2, 0).astype(np.float32, copy=False)
-                mat_dict = {
-                    # "seq_input_DB": mat_input_db_batch[local_idx].numpy().astype(np.float32, copy=False),
-                    # "seq_GT_DB": mat_gt_db_batch[local_idx].numpy().astype(np.float32, copy=False),
-                    "seq_pred_DB": mat_pred_db,
-                    # "seq_input_Linear": mat_input_linear_batch[local_idx].numpy().astype(np.float32, copy=False),
-                    # "seq_GT_Linear": mat_gt_linear_batch[local_idx].numpy().astype(np.float32, copy=False),
-                }
-                save_prediction_file(predictions_dir / file_name, mat_dict)
+                save_prediction_file(predictions_dir / file_name, {"seq_pred_DB": mat_pred_db})
 
             progress.set_postfix(
                 psnr=f"{(sum(batch_psnr_values) / max(len(batch_psnr_values), 1)):.2f}",
@@ -305,8 +271,8 @@ def main():
         "mean_psnr": mean_psnr,
         "mean_ssim": mean_ssim,
         "predictions_dir": str(predictions_dir.resolve()),
-        "linear_dir": os.path.abspath(dataset.linear_dir),
         "prediction_format": "mat",
+        "saved_keys": ["seq_pred_DB"],
         "sample_prefixes": sorted({dataset._get_prefix(path) for path in dataset.db_paths}),
     }
 

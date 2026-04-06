@@ -29,6 +29,19 @@ sum_ssim_in_lin   = zeros(1, 3);
 sum_psnr_pred_lin = zeros(1, 3);
 sum_ssim_pred_lin = zeros(1, 3);
 
+% ==========================================
+% 新增：逐帧(1~16)累加器
+% ==========================================
+sum_psnr_in_db_by_frame   = zeros(1, 16);
+sum_ssim_in_db_by_frame   = zeros(1, 16);
+sum_psnr_pred_db_by_frame = zeros(1, 16);
+sum_ssim_pred_db_by_frame = zeros(1, 16);
+
+sum_psnr_in_lin_by_frame   = zeros(1, 16);
+sum_ssim_in_lin_by_frame   = zeros(1, 16);
+sum_psnr_pred_lin_by_frame = zeros(1, 16);
+sum_ssim_pred_lin_by_frame = zeros(1, 16);
+
 valid_count = 0; 
 
 %% ==========================================
@@ -103,6 +116,19 @@ for file_idx = 1:length(pred_files)
         cur_psnr_pred_lin(f) = psnr(pred_lin, gt_lin, 1.0);
         cur_ssim_pred_lin(f) = ssim(pred_lin, gt_lin);
     end
+
+    % ==========================================
+    % 新增：逐帧(1~16)累加
+    % ==========================================
+    sum_psnr_in_db_by_frame   = sum_psnr_in_db_by_frame   + cur_psnr_in_db;
+    sum_ssim_in_db_by_frame   = sum_ssim_in_db_by_frame   + cur_ssim_in_db;
+    sum_psnr_pred_db_by_frame = sum_psnr_pred_db_by_frame + cur_psnr_pred_db;
+    sum_ssim_pred_db_by_frame = sum_ssim_pred_db_by_frame + cur_ssim_pred_db;
+
+    sum_psnr_in_lin_by_frame   = sum_psnr_in_lin_by_frame   + cur_psnr_in_lin;
+    sum_ssim_in_lin_by_frame   = sum_ssim_in_lin_by_frame   + cur_ssim_in_lin;
+    sum_psnr_pred_lin_by_frame = sum_psnr_pred_lin_by_frame + cur_psnr_pred_lin;
+    sum_ssim_pred_lin_by_frame = sum_ssim_pred_lin_by_frame + cur_ssim_pred_lin;
     
     % ==========================================
     % 将 16 帧的成绩归类装入 3 个累加器箱子
@@ -167,6 +193,19 @@ avg_ssim_in_lin   = sum_ssim_in_lin ./ divisor;
 avg_psnr_pred_lin = sum_psnr_pred_lin ./ divisor;
 avg_ssim_pred_lin = sum_ssim_pred_lin ./ divisor;
 
+% ==========================================
+% 新增：逐帧(1~16)均值
+% ==========================================
+avg_psnr_in_db_by_frame   = sum_psnr_in_db_by_frame   / valid_count;
+avg_ssim_in_db_by_frame   = sum_ssim_in_db_by_frame   / valid_count;
+avg_psnr_pred_db_by_frame = sum_psnr_pred_db_by_frame / valid_count;
+avg_ssim_pred_db_by_frame = sum_ssim_pred_db_by_frame / valid_count;
+
+avg_psnr_in_lin_by_frame   = sum_psnr_in_lin_by_frame   / valid_count;
+avg_ssim_in_lin_by_frame   = sum_ssim_in_lin_by_frame   / valid_count;
+avg_psnr_pred_lin_by_frame = sum_psnr_pred_lin_by_frame / valid_count;
+avg_ssim_pred_lin_by_frame = sum_ssim_pred_lin_by_frame / valid_count;
+
 %% ==========================================
 % 5. 打印漂亮的学术表格
 % ==========================================
@@ -198,6 +237,108 @@ fprintf('-----------------------------------------------------------------------
 fprintf(' %-18s | %10.4f        | %10.4f        | %10.4f\n', 'Input SSIM', avg_ssim_in_lin(1), avg_ssim_in_lin(2), avg_ssim_in_lin(3));
 fprintf(' %-18s | %10.4f        | %10.4f        | %10.4f\n', 'Pred  SSIM (U-Net)', avg_ssim_pred_lin(1), avg_ssim_pred_lin(2), avg_ssim_pred_lin(3));
 fprintf(repmat('=', 1, 75) + "\n");
+
+
+%% ==========================================
+% 6. 新增：分别绘制 1~16 帧均值趋势图（PSNR / SSIM）
+% ==========================================
+x = 1:16;
+
+% 浅色背景定义
+bg_180 = [0.90, 0.95, 1.00];
+bg_mix = [0.95, 0.95, 0.95];
+bg_60  = [1.00, 0.95, 0.90];
+
+%% ------------------ 图1：PSNR ------------------
+fig_psnr = figure('Color', 'w', 'Position', [100, 100, 1100, 420]);
+ax1 = axes(fig_psnr);
+hold(ax1, 'on');
+
+yl1_tmp = [ ...
+    avg_psnr_in_db_by_frame, avg_psnr_pred_db_by_frame, ...
+    avg_psnr_in_lin_by_frame, avg_psnr_pred_lin_by_frame];
+ymin1 = min(yl1_tmp) - 0.5;
+ymax1 = max(yl1_tmp) + 0.5;
+
+% 背景区间：180 -> mix -> 60 -> mix -> 180
+patch([0.5 4.5 4.5 0.5],     [ymin1 ymin1 ymax1 ymax1], bg_180, 'EdgeColor', 'none', 'FaceAlpha', 0.5);
+patch([4.5 5.5 5.5 4.5],     [ymin1 ymin1 ymax1 ymax1], bg_mix, 'EdgeColor', 'none', 'FaceAlpha', 0.7);
+patch([5.5 11.5 11.5 5.5],   [ymin1 ymin1 ymax1 ymax1], bg_60,  'EdgeColor', 'none', 'FaceAlpha', 0.5);
+patch([11.5 12.5 12.5 11.5], [ymin1 ymin1 ymax1 ymax1], bg_mix, 'EdgeColor', 'none', 'FaceAlpha', 0.7);
+patch([12.5 16.5 16.5 12.5], [ymin1 ymin1 ymax1 ymax1], bg_180, 'EdgeColor', 'none', 'FaceAlpha', 0.5);
+
+plot(x, avg_psnr_in_db_by_frame,    '-o', 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'Input DB PSNR');
+plot(x, avg_psnr_pred_db_by_frame,  '-o', 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'Pred DB PSNR');
+plot(x, avg_psnr_in_lin_by_frame,   '-s', 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'Input Linear PSNR');
+plot(x, avg_psnr_pred_lin_by_frame, '-s', 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'Pred Linear PSNR');
+
+xlim([1 16]);
+ylim([ymin1 ymax1]);
+xticks(1:16);
+xlabel('Frame Index');
+ylabel('PSNR / dB');
+title(sprintf('Average PSNR over Frame Index (1~16) across %d Sequences', valid_count));
+grid on;
+legend('Location', 'best');
+
+text(2.5,  ymax1 - 0.08*(ymax1-ymin1), '180MHz', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(5.0,  ymax1 - 0.08*(ymax1-ymin1), 'Mix',    'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(8.5,  ymax1 - 0.08*(ymax1-ymin1), '60MHz',  'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(12.0, ymax1 - 0.08*(ymax1-ymin1), 'Mix',    'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(14.5, ymax1 - 0.08*(ymax1-ymin1), '180MHz', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+
+hold(ax1, 'off');
+
+% 如需保存图像可取消注释
+% exportgraphics(fig_psnr, './img/per_frame_metrics_psnr.png', 'Resolution', 300);
+
+%% ------------------ 图2：SSIM ------------------
+fig_ssim = figure('Color', 'w', 'Position', [120, 160, 1100, 420]);
+ax2 = axes(fig_ssim);
+hold(ax2, 'on');
+
+yl2_tmp = [ ...
+    avg_ssim_in_db_by_frame, avg_ssim_pred_db_by_frame, ...
+    avg_ssim_in_lin_by_frame, avg_ssim_pred_lin_by_frame];
+ymin2 = min(yl2_tmp) - 0.02;
+ymax2 = max(yl2_tmp) + 0.02;
+
+patch([0.5 4.5 4.5 0.5],     [ymin2 ymin2 ymax2 ymax2], bg_180, 'EdgeColor', 'none', 'FaceAlpha', 0.5);
+patch([4.5 5.5 5.5 4.5],     [ymin2 ymin2 ymax2 ymax2], bg_mix, 'EdgeColor', 'none', 'FaceAlpha', 0.7);
+patch([5.5 11.5 11.5 5.5],   [ymin2 ymin2 ymax2 ymax2], bg_60,  'EdgeColor', 'none', 'FaceAlpha', 0.5);
+patch([11.5 12.5 12.5 11.5], [ymin2 ymin2 ymax2 ymax2], bg_mix, 'EdgeColor', 'none', 'FaceAlpha', 0.7);
+patch([12.5 16.5 16.5 12.5], [ymin2 ymin2 ymax2 ymax2], bg_180, 'EdgeColor', 'none', 'FaceAlpha', 0.5);
+
+plot(x, avg_ssim_in_db_by_frame,    '-o', 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'Input DB SSIM');
+plot(x, avg_ssim_pred_db_by_frame,  '-o', 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'Pred DB SSIM');
+plot(x, avg_ssim_in_lin_by_frame,   '-s', 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'Input Linear SSIM');
+plot(x, avg_ssim_pred_lin_by_frame, '-s', 'LineWidth', 1.5, 'MarkerSize', 5, 'DisplayName', 'Pred Linear SSIM');
+
+xlim([1 16]);
+ylim([ymin2 ymax2]);
+xticks(1:16);
+xlabel('Frame Index');
+ylabel('SSIM');
+title(sprintf('Average SSIM over Frame Index (1~16) across %d Sequences', valid_count));
+grid on;
+legend('Location', 'best');
+
+text(2.5,  ymax2 - 0.08*(ymax2-ymin2), '180MHz', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(5.0,  ymax2 - 0.08*(ymax2-ymin2), 'Mix',    'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(8.5,  ymax2 - 0.08*(ymax2-ymin2), '60MHz',  'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(12.0, ymax2 - 0.08*(ymax2-ymin2), 'Mix',    'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(14.5, ymax2 - 0.08*(ymax2-ymin2), '180MHz', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+
+hold(ax2, 'off');
+
+% 如需保存图像可取消注释
+% exportgraphics(fig_ssim, './img/per_frame_metrics_ssim.png', 'Resolution', 300);
+
+
+
+
+% 如需保存图像可取消注释
+% exportgraphics(fig_trend, './img/per_frame_metrics_trend.png', 'Resolution', 300);
 
 %% ==========================================
 % 附：逆向物理还原函数 (Advanced版)

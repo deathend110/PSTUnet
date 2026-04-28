@@ -1,1 +1,3 @@
-然后你阅读inference_output\Inference_compute_draw.m，这里是针对原数据集及其推理结果的分析脚本，你基于现在的inference_output\seqdatacut_azimuth_25.m和infer_linux.py，更新一下数据路径和加载逻辑。同时由于我25帧数据的高低采样率分布有变化，同步更新绘图逻辑
+添加codex约束：
+1. 输出用中文，全程用UTF-8
+2. 代码都要附带上中文注释，注释程度为我能通过注释快速浏览并了解代码流程和作用

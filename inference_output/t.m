@@ -10,7 +10,7 @@ max_val = 65535.0;  % 根据保存时的量化极值设定 (uint16=65535)
 
 % ==================== 2. 加载测试序列 ====================
 % 请替换为你的真实文件路径 (这里强烈建议测试 GT 图像)
-test_file = "G:\VSCODE-G\PST_Dataset\DB\traindata\suburb_DB_seq_007656.mat";
+test_file = "G:\MATLAB-G\SAR Full PSF\Sequence_Dataset_AzimuthMix_q3_rt_only\DB\traindata\suburb_DB_seq_002175.mat";
 
 if exist(test_file, 'file')
     fprintf('⏳ 正在读取文件: %s\n', test_file);

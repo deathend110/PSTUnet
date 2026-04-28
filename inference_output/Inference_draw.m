@@ -110,14 +110,20 @@ for file_idx = 1:length(pred_files)
     vmax_db = meta_data.V_MAX_GT;
     vmin_db = meta_data.V_MIN_GT;
 
-    pred_data = load(pred_filepath);
-    seq_pred_DB      = double(pred_data.seq_pred_DB);
-
     seq_GT_DB        = double(h5read(DB_filepath, '/seq_GT')) / 255;
     seq_input_DB     = double(h5read(DB_filepath, '/seq_input')) / 255;
 
     seq_GT_Linear    = double(h5read(Linear_filepath, '/seq_GT_L')) / 255;
     seq_input_Linear = double(h5read(Linear_filepath, '/seq_input_L')) / 255;
+
+    pred_data = load(pred_filepath);
+    seq_pred_DB = double(pred_data.seq_pred_DB);
+    [seq_pred_DB, was_transposed, psnr_direct, psnr_transposed] = ...
+        align_prediction_orientation(seq_pred_DB, seq_GT_DB);
+    if was_transposed && file_idx == 1
+        fprintf('Prediction orientation auto-corrected: direct %.4f dB, transposed %.4f dB\n', ...
+            psnr_direct, psnr_transposed);
+    end
 
     seq_pred_Linear_raw = sar_inverse_normalize_modality_advanced(seq_pred_DB, vmax_db, vmin_db);
 
@@ -228,4 +234,27 @@ function img_linear = sar_inverse_normalize_modality_advanced(img_norm, v_max, v
     img_db = img_norm .* (v_max - v_min) + v_min;
     img_linear = 10.^(img_db / 20);
     img_linear(img_linear < 0) = 0;
+end
+
+function [seq_pred_DB, was_transposed, psnr_direct, psnr_transposed] = ...
+    align_prediction_orientation(seq_pred_DB, seq_GT_DB)
+    total_frames = size(seq_pred_DB, 3);
+    probe_frames = unique(round(linspace(1, total_frames, min(total_frames, 3))));
+
+    psnr_direct_vals = zeros(1, numel(probe_frames));
+    psnr_transposed_vals = zeros(1, numel(probe_frames));
+    for idx = 1:numel(probe_frames)
+        f = probe_frames(idx);
+        pred_frame = seq_pred_DB(:, :, f);
+        gt_frame = seq_GT_DB(:, :, f);
+        psnr_direct_vals(idx) = psnr(pred_frame, gt_frame, 1.0);
+        psnr_transposed_vals(idx) = psnr(pred_frame.', gt_frame, 1.0);
+    end
+
+    psnr_direct = mean(psnr_direct_vals);
+    psnr_transposed = mean(psnr_transposed_vals);
+    was_transposed = psnr_transposed > psnr_direct + 0.1;
+    if was_transposed
+        seq_pred_DB = permute(seq_pred_DB, [2, 1, 3]);
+    end
 end

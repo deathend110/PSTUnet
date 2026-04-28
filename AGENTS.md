@@ -10,6 +10,16 @@ This repository is a SAR sequence restoration project built around:
 
 Work in SAR terms, not generic image denoising terms. The project operates on normalized SAR sequence patches and uses Matlab scripts for DB-domain and Linear-domain post-evaluation.
 
+## User Preferences
+
+- All user-facing output should be written in Chinese.
+- Use UTF-8 consistently when editing or creating project files. Preserve existing file encodings only if changing them would risk breaking execution; if that happens, explain it explicitly.
+- Add Chinese code comments by default. The comment density should be high enough that the user can skim the file and quickly understand the code flow and purpose.
+- For non-trivial functions or code blocks, prefer comments that explain:
+  - the processing stage or intent
+  - the input/output meaning
+  - why a branch or transformation exists
+
 ## Repository Layout
 
 - [train.py](/g:/VSCODE-G/PSTUnet/train.py): main training entry, supports single GPU, `DataParallel`, and DDP

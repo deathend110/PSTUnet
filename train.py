@@ -1,3 +1,10 @@
+'''
+V2：Mask-aware PST-UNet
+- 训练损失：L1 + TV
+- 第二通道：真实空间 mode mask
+- 模型内部 PST 门控已对齐空间 mask
+'''
+
 import argparse
 import copy
 import logging
@@ -22,7 +29,7 @@ except ImportError:
 
 from datasets import SARDataset
 from model import PST_UNet
-from utils import AverageMeter, EarlyStopping, SSIMLoss, Seq_SAR_HybridLoss, calc_psnr
+from utils import AverageMeter, EarlyStopping, SSIMLoss, Seq_SAR_L1TVLoss, calc_psnr
 
 
 class TrainModelWrapper(nn.Module):
@@ -30,7 +37,6 @@ class TrainModelWrapper(nn.Module):
     Compute loss inside forward so multi-GPU training only needs to gather
     small scalars during the training step.
     """
-
     def __init__(self, model, criterion):
         super().__init__()
         self.model = model
@@ -43,12 +49,12 @@ class TrainModelWrapper(nn.Module):
         return self.criterion(outputs, targets)
 
 
-def setup_logger(log_dir, is_main_process):
+def setup_logger(log_dir, is_main_process_flag):
     logger = logging.getLogger("TrainLogger")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
 
-    if is_main_process:
+    if is_main_process_flag:
         log_file = os.path.join(log_dir, "train.log")
         formatter = logging.Formatter("%(asctime)s - %(message)s")
 
@@ -84,7 +90,7 @@ def set_optimizer_lr(optimizer, lr):
         param_group["lr"] = lr
 
 
-def get_epoch_schedule(epoch_index, base_lr, ssim_weight):
+def get_epoch_schedule(epoch_index, base_lr):
     epoch_id = epoch_index + 1
 
     if epoch_id <= 15:
@@ -92,36 +98,24 @@ def get_epoch_schedule(epoch_index, base_lr, ssim_weight):
             "stage_name": "WarmupAndBaseFit",
             "phase_desc": "[L1+TV | LR=1e-4 | Epoch 1-15]",
             "lr": base_lr,
-            "ssim_weight": 0.0,
         }
     if epoch_id <= 25:
         return {
             "stage_name": "StructureStabilize",
             "phase_desc": "[L1+TV | LR=5e-5 | Epoch 16-25]",
             "lr": base_lr * 0.5,
-            "ssim_weight": 0.0,
         }
     if epoch_id <= 35:
         return {
-            "stage_name": "PerceptualFinetune",
-            "phase_desc": "[L1+TV+SSIM | LR=1e-5 | Epoch 26-35]",
+            "stage_name": "Finetune",
+            "phase_desc": "[L1+TV | LR=1e-5 | Epoch 26-35]",
             "lr": base_lr * 0.1,
-            "ssim_weight": ssim_weight,
         }
     return {
         "stage_name": "ExtremeConverge",
-        "phase_desc": "[L1+TV+SSIM | LR=1e-6 | Epoch 36+]",
+        "phase_desc": "[L1+TV | LR=1e-6 | Epoch 36+]",
         "lr": base_lr * 0.01,
-        "ssim_weight": ssim_weight,
     }
-
-
-def compute_validation_score(psnr_value, ssim_value, ssim_scale):
-    """
-    Keep validation selection criteria fixed across the whole run so checkpoint
-    comparison and early stopping do not change when the training loss changes.
-    """
-    return psnr_value + (ssim_value * ssim_scale)
 
 
 def is_dist_initialized():
@@ -140,10 +134,6 @@ def get_rank():
     return dist.get_rank() if is_dist_initialized() else 0
 
 
-def unwrap_model(model):
-    return model.module if hasattr(model, "module") else model
-
-
 def reduce_average(sum_value, count_value, device):
     if not is_dist_initialized():
         return sum_value / max(count_value, 1)
@@ -158,11 +148,6 @@ def broadcast_flags(flags, device):
     if is_dist_initialized():
         dist.broadcast(tensor, src=0)
     return tensor.tolist()
-
-
-def maybe_barrier():
-    if is_dist_initialized():
-        dist.barrier()
 
 
 def init_runtime(args):
@@ -237,9 +222,9 @@ def cleanup_distributed():
 
 
 def main():
-    model_name = "PST_UNet"
-    dataset_name = "PST_Dataset"
-    loss_name = "L1+TV+DynSSIM"
+    model_name = "PST_UNet_MaskAware"
+    dataset_name = "Sequence_Dataset_AzimuthMix"
+    loss_name = "L1+TV"
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-dir", type=str, default=r"G:\VSCODE-G\PST_Dataset")
@@ -254,8 +239,6 @@ def main():
     )
     parser.add_argument("--outputs-dir", type=str, default="./output/")
     parser.add_argument("--tv-weight", type=float, default=1e-3)
-    parser.add_argument("--ssim-weight", type=float, default=0.2)
-    parser.add_argument("--score-ssim-scale", type=float, default=50.0)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
         "--batch-size",
@@ -300,31 +283,29 @@ def main():
     logger.info(f"Start training job: {file_name}")
     logger.info(f"Arguments: {vars(args)}")
     logger.info("=" * 50)
+
     if scipy is None:
         logger.warning("scipy is not installed. Training will continue, but .mat history files will not be written.")
 
     if use_cuda:
-        gpu_desc = ", ".join(f"cuda:{gid}({torch.cuda.get_device_name(gid)})" for gid in device_ids) if device_ids else "none"
+        gpu_desc = ", ".join(
+            f"cuda:{gid}({torch.cuda.get_device_name(gid)})" for gid in device_ids
+        ) if device_ids else "none"
+
         if distributed:
             logger.info(
                 f"Runtime: DDP | rank={get_rank()} | world_size={world_size} | local device={device} | visible selection={gpu_desc}"
             )
             logger.info(f"Global batch size: {args.batch_size * world_size} ({args.batch_size} per process)")
         else:
-            logger.info(f"Runtime: {'DataParallel' if len(device_ids) > 1 else 'Single GPU'} | device={device} | selected GPUs: {gpu_desc}")
-            if len(device_ids) > 1 and args.batch_size < len(device_ids):
-                logger.warning(
-                    f"batch-size={args.batch_size} is smaller than GPU count={len(device_ids)}; some GPUs will stay idle."
-                )
-            elif len(device_ids) > 1 and args.batch_size % len(device_ids) != 0:
-                logger.warning(
-                    f"batch-size={args.batch_size} is not divisible by GPU count={len(device_ids)}; per-GPU load will be uneven."
-                )
+            logger.info(
+                f"Runtime: {'DataParallel' if len(device_ids) > 1 else 'Single GPU'} | device={device} | selected GPUs: {gpu_desc}"
+            )
     else:
         logger.info(f"Runtime: CPU | device={device}")
 
     model = PST_UNet(in_channels=2, out_channels=1, base_dim=64)
-    criterion = Seq_SAR_HybridLoss(tv_weight=args.tv_weight, ssim_weight=0.0)
+    criterion = Seq_SAR_L1TVLoss(tv_weight=args.tv_weight)
     wrapped_model = TrainModelWrapper(model, criterion).to(device)
 
     if distributed:
@@ -335,11 +316,16 @@ def main():
             broadcast_buffers=False,
         )
     elif len(device_ids) > 1:
-        wrapped_model = DataParallel(wrapped_model, device_ids=device_ids, output_device=device_ids[0])
+        wrapped_model = DataParallel(
+            wrapped_model,
+            device_ids=device_ids,
+            output_device=device_ids[0]
+        )
 
     amp_enabled = use_cuda
     autocast_context = (
-        (lambda: torch.amp.autocast(device_type="cuda", enabled=True)) if amp_enabled else nullcontext
+        (lambda: torch.amp.autocast(device_type="cuda", enabled=True))
+        if amp_enabled else nullcontext
     )
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     ssim_calculator = SSIMLoss().to(device)
@@ -350,6 +336,7 @@ def main():
     early_stopping = EarlyStopping(args.patience, verbose=False)
     model_save_path = os.path.join(args.outputs_dir, "best_early_stopping.pth")
     early_stopping.path = model_save_path
+
     dataloader_kwargs = {
         "num_workers": args.num_workers,
         "pin_memory": use_cuda,
@@ -381,6 +368,7 @@ def main():
         drop_last=False,
         **dataloader_kwargs,
     )
+
     logger.info(f"Dataset ready. Train samples: {len(train_dataset)}, Eval samples: {len(eval_dataset)}")
 
     best_weights = copy.deepcopy(model.state_dict())
@@ -392,15 +380,14 @@ def main():
 
     logger.info("=" * 50)
     logger.info("Start training loop...")
+
     for epoch in range(args.num_epochs):
         tc = time.time()
 
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        wrapper_module = unwrap_model(wrapped_model)
-        schedule = get_epoch_schedule(epoch, base_lr, args.ssim_weight)
-        wrapper_module.criterion.ssim_weight = schedule["ssim_weight"]
+        schedule = get_epoch_schedule(epoch, base_lr)
         set_optimizer_lr(optimizer, schedule["lr"])
         phase_desc = schedule["phase_desc"]
 
@@ -419,27 +406,20 @@ def main():
             targets = targets.to(device, non_blocking=use_cuda)
 
             is_accumulating = (i + 1) % args.grad_accum_steps != 0 and (i + 1) != len(train_dataloader)
-            
-            # 使用 DDP no_sync 避免在累加步骤中执行多余的跨卡通信
             context = wrapped_model.no_sync() if (is_accumulating and distributed) else nullcontext()
-            
+
             with context:
                 with autocast_context():
                     loss = wrapped_model(inputs, targets)
                     if loss.ndim > 0:
                         loss = loss.mean()
-                    # 对 loss 进行平均缩放，使累加后的梯度量级保持一致
                     scaled_loss = loss / args.grad_accum_steps
 
                 scaler.scale(scaled_loss).backward()
-            
-            # 当达到累加步数或者是最后一个 batch 时，执行参数更新
+
             if not is_accumulating:
-                # [Critical Fix] 恢复极其严格的梯度裁剪 (1.0)
-                # 时序循环 16 步极易产生梯度尖峰，放宽裁剪会导致 AdamW 的方差项被尖峰撑爆，彻底扼杀有效学习率！
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(wrapped_model.parameters(), max_norm=1.0)
-                
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
@@ -482,17 +462,14 @@ def main():
         epoch_psnr_avg = reduce_average(epoch_psnr.sum, epoch_psnr.count, device)
         epoch_ssim_avg = reduce_average(epoch_ssim.sum, epoch_ssim.count, device)
 
-        current_score = compute_validation_score(
-            psnr_value=epoch_psnr_avg,
-            ssim_value=epoch_ssim_avg,
-            ssim_scale=args.score_ssim_scale,
-        )
+        current_score = epoch_psnr_avg
 
         should_stop = [0]
         if is_main_process():
             loss_avg.append(train_loss_avg)
             psnr_avg.append(epoch_psnr_avg)
             ssim_avg.append(epoch_ssim_avg)
+
             save_history_mat(os.path.join(args.outputs_dir, "loss_avg.mat"), "loss_avg", loss_avg)
             save_history_mat(os.path.join(args.outputs_dir, "psnr_avg.mat"), "psnr_avg", psnr_avg)
             save_history_mat(os.path.join(args.outputs_dir, "ssim_avg.mat"), "ssim_avg", ssim_avg)
@@ -504,8 +481,8 @@ def main():
                 torch.save(best_weights, os.path.join(args.outputs_dir, "best.pth"))
                 logger.info(
                     "New best model. "
-                    f"Score: {best_score:.2f} "
-                    f"(PSNR: {epoch_psnr_avg:.2f}, SSIM: {epoch_ssim_avg:.4f}) -> saved to best.pth"
+                    f"PSNR score: {best_score:.4f} "
+                    f"(PSNR: {epoch_psnr_avg:.4f}, SSIM: {epoch_ssim_avg:.4f}) -> saved to best.pth"
                 )
 
             early_stopping(-current_score, model)
@@ -515,7 +492,7 @@ def main():
 
             te = time.time()
             logger.info(
-                "Epoch [{}/{}] | stage: {} | lr: {:.2e} | train loss: {:.6f} | eval psnr: {:.2f} | eval ssim: {:.4f} | score: {:.2f} | Time: {:.2f}s".format(
+                "Epoch [{}/{}] | stage: {} | lr: {:.2e} | train loss: {:.6f} | eval psnr: {:.4f} | eval ssim: {:.4f} | psnr_score: {:.4f} | Time: {:.2f}s".format(
                     epoch,
                     args.num_epochs - 1,
                     schedule["stage_name"],
@@ -529,13 +506,12 @@ def main():
             )
 
         should_stop = broadcast_flags(should_stop, device if use_cuda else torch.device("cpu"))
-
         if should_stop[0] == 1:
             break
 
     if is_main_process():
         logger.info("=" * 50)
-        logger.info(f"Training finished. Best epoch: {best_epoch}, best score: {best_score:.2f}")
+        logger.info(f"Training finished. Best epoch: {best_epoch}, best PSNR score: {best_score:.4f}")
 
     cleanup_distributed()
 

@@ -1,14 +1,11 @@
 import argparse
 import csv
-import glob
 import json
 import os
 import random
 from contextlib import nullcontext
 from pathlib import Path
 
-import h5py
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -18,6 +15,8 @@ try:
 except ImportError:
     scipy = None
 
+import numpy as np
+from datasets import SARDataset
 from model import PST_UNet
 from utils import SSIMLoss, calc_psnr
 
@@ -26,13 +25,16 @@ class DBInferenceDataset(Dataset):
     def __init__(self, base_dir, max_val=255.0, num_samples=None, seed=42):
         self.base_dir = base_dir
         self.max_val = max_val
-        self.db_dir = os.path.join(base_dir, "DB", "testdata")
-        all_db_paths = sorted(glob.glob(os.path.join(self.db_dir, "*.mat")))
+        self.dataset = SARDataset(base_dir=base_dir, domain="DB", mode="test", max_val=max_val)
+        self.db_dir = self.dataset.data_dir
+        all_db_paths = list(self.dataset.file_paths)
 
         if num_samples is not None:
             self.db_paths = self._sample_db_paths(all_db_paths, num_samples=num_samples, seed=seed)
         else:
             self.db_paths = all_db_paths
+
+        self.dataset.file_paths = self.db_paths
 
     def __len__(self):
         return len(self.db_paths)
@@ -83,31 +85,17 @@ class DBInferenceDataset(Dataset):
     def __getitem__(self, idx):
         db_path = self.db_paths[idx]
         db_name = os.path.basename(db_path)
-
-        with h5py.File(db_path, "r") as f_db:
-            seq_input_db_raw = np.array(f_db["/seq_input"]).astype(np.float32)
-            seq_gt_db_raw = np.array(f_db["/seq_GT"]).astype(np.float32)
-            frame_type = np.array(f_db["/frame_type"]).astype(np.float32).flatten()
-
-        seq_input_db = seq_input_db_raw.transpose(0, 2, 1) / self.max_val
-        seq_gt_db = seq_gt_db_raw.transpose(0, 2, 1) / self.max_val
-
-        t, h, w = seq_input_db.shape
-        prompt_mask = np.broadcast_to(frame_type[:, np.newaxis, np.newaxis], (t, h, w)).astype(np.float32)
-        input_tensor = np.stack([seq_input_db, prompt_mask], axis=0).astype(np.float32)
-        target_tensor = seq_gt_db[np.newaxis, :, :, :].astype(np.float32)
-
-        return torch.from_numpy(input_tensor), torch.from_numpy(target_tensor), db_name
+        input_tensor, target_tensor = self.dataset[idx]
+        return input_tensor, target_tensor, db_name
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="PST-UNet DB-only inference script for Linux")
     default_checkpoint = (
-        "./output/Model(PST_UNet)-Dataset(PST_Dataset)-Loss"
-        "(L1+TV+DynSSIM+tv0.002000)-Epochs40-Batch_size1-lr0.000100/best.pth"
+        "./output/Model(PST_UNet_MaskAware)-Dataset(Sequence_Dataset_AzimuthMix)-Loss(L1+TV+tv0.002000)-Epochs40-Batch_size2-lr0.000100/best.pth"
     )
     parser.add_argument("--checkpoint", type=str, default=default_checkpoint, help="Path to a model state_dict checkpoint.")
-    parser.add_argument("--base-dir", type=str, default="/root/autodl-tmp/PST_Dataset")
+    parser.add_argument("--base-dir", type=str, default="/root/autodl-tmp/Sequence_Dataset_AzimuthMix_q3_rt_only")
     parser.add_argument("--output-dir", type=str, default="./inference_output/db_test")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)

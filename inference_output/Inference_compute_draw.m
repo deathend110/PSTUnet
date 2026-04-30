@@ -167,8 +167,8 @@ for file_idx = 1:length(pred_files)
         cur_ssim_in_lin(f) = ssim(in_lin, gt_lin);
         cur_psnr_pred_lin(f) = psnr(pred_lin, gt_lin, 1.0);
         cur_ssim_pred_lin(f) = ssim(pred_lin, gt_lin);
-        % subplot(121);imagesc(pred_lin); colormap(gca, 'gray'); axis image off;
-        % subplot(122);imagesc(gt_lin); colormap(gca, 'gray'); axis image off;
+        subplot(121);imagesc(pred_lin); colormap(gca, 'gray'); axis image off;
+        subplot(122);imagesc(gt_lin); colormap(gca, 'gray'); axis image off;
         
         group_idx = map_frame_mode_to_group(frame_mode_id(f), group_ids);
         if group_idx > 0

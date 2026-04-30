@@ -412,8 +412,6 @@ class PST_UNet(nn.Module):
         return restored_seq
 
 
-scaler = torch.amp.GradScaler("cuda")
-
 if __name__ == '__main__':
     print("🚀 启动 Mask-aware PST-UNet 梯度反向传播连通性测试...\n")
 
@@ -435,6 +433,11 @@ if __name__ == '__main__':
         model = nn.DataParallel(model)
 
     model.train()
+
+    # 仅在本地梯度连通性调试分支中创建 AMP scaler。
+    # 正常训练时 import model.py 不应提前触发 CUDA/AMP 初始化，
+    # 否则在 DDP 的 LOCAL_RANK 绑定设备前就可能引入底层状态副作用。
+    scaler = torch.amp.GradScaler("cuda", enabled=torch.cuda.is_available())
 
     print("⏳ 正在执行前向传播 (Forward)...")
     with torch.amp.autocast('cuda', enabled=torch.cuda.is_available()):

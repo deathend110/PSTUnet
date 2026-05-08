@@ -266,11 +266,10 @@ def main():
     logger = None
 
     model_name = "PST_UNet"
-    dataset_name = "Sequence_Dataset_AzimuthMix"
     loss_name = "L1+TV"
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-dir", type=str, default=r"G:\VSCODE-G\PST_Dataset")
+    parser.add_argument("--base-dir", type=str, default="/root/autodl-tmp/Sequence_Dataset_AzimuthMix_q3_rt_only")
     parser.add_argument("--domain", type=str, default="Linear", choices=["Linear"])
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-val", type=float, default=255.0)
@@ -305,6 +304,8 @@ def main():
         help="Number of steps to accumulate gradients before updating. Global batch size = batch-size * WORLD_SIZE * grad-accum-steps.",
     )
     args = parser.parse_args()
+
+    dataset_name = os.path.basename(args.base_dir.rstrip("/\\")).replace('Sequence_Dataset_', '').replace('_rt_only', '')
 
     runtime = init_runtime(args)
     use_cuda = runtime["use_cuda"]

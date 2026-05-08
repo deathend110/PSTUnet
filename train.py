@@ -1,15 +1,18 @@
-'''
+"""
 V2：Mask-aware PST-UNet
 - 训练损失：L1 + TV
 - 第二通道：真实空间 mode mask
 - 模型内部 PST 门控已对齐空间 mask
-'''
+"""
 
 import argparse
 import copy
+import faulthandler
 import logging
 import os
+import sys
 import time
+import traceback
 from contextlib import nullcontext
 
 import torch
@@ -32,11 +35,15 @@ from model import PST_UNet
 from utils import AverageMeter, EarlyStopping, SSIMLoss, Seq_SAR_L1TVLoss, calc_psnr
 
 
+_FATAL_LOG_HANDLE = None
+
+
 class TrainModelWrapper(nn.Module):
     """
-    Compute loss inside forward so multi-GPU training only needs to gather
-    small scalars during the training step.
+    将损失计算包进 forward。
+    这样在多卡训练时，训练步骤只需要同步标量 loss，不需要额外拼装外部逻辑。
     """
+
     def __init__(self, model, criterion):
         super().__init__()
         self.model = model
@@ -49,25 +56,68 @@ class TrainModelWrapper(nn.Module):
         return self.criterion(outputs, targets)
 
 
-def setup_logger(log_dir, is_main_process_flag):
+class RankContextFilter(logging.Filter):
+    """为每条日志补齐 rank 字段，避免 formatter 使用 %(rank)s 时报错。"""
+
+    def __init__(self, rank):
+        super().__init__()
+        self.rank = rank
+
+    def filter(self, record):
+        if not hasattr(record, "rank"):
+            record.rank = self.rank
+        return True
+
+
+def enable_fault_logging(log_dir, rank):
+    """
+    打开 fatal 日志。
+    当训练进程收到 SIGSEGV / SIGABRT 等致命信号时，faulthandler 会把 Python 栈写入文件。
+    """
+
+    global _FATAL_LOG_HANDLE
+
+    fatal_log_path = os.path.join(log_dir, f"fatal_rank{rank}.log")
+    _FATAL_LOG_HANDLE = open(fatal_log_path, "a", encoding="utf-8")
+    faulthandler.enable(file=_FATAL_LOG_HANDLE, all_threads=True)
+    return fatal_log_path
+
+
+def setup_logger(log_dir, is_main_process_flag, rank):
+    """
+    日志策略：
+    - 每个 rank 各自写一份 train_rank{rank}.log，便于 DDP 排障
+    - 主进程额外写 train.log，并输出到终端
+    """
+
     logger = logging.getLogger("TrainLogger")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
+    logger.filters.clear()
+    logger.propagate = False
+
+    formatter = logging.Formatter("%(asctime)s - [rank %(rank)s] - %(message)s")
+    rank_filter = RankContextFilter(rank)
+    logger.addFilter(rank_filter)
+
+    rank_log_file = os.path.join(log_dir, f"train_rank{rank}.log")
+    rank_handler = logging.FileHandler(rank_log_file, encoding="utf-8")
+    rank_handler.setFormatter(formatter)
+    rank_handler.addFilter(rank_filter)
+    logger.addHandler(rank_handler)
 
     if is_main_process_flag:
-        log_file = os.path.join(log_dir, "train.log")
-        formatter = logging.Formatter("%(asctime)s - %(message)s")
-
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setFormatter(formatter)
+        main_log_file = os.path.join(log_dir, "train.log")
+        main_handler = logging.FileHandler(main_log_file, encoding="utf-8")
+        main_handler.setFormatter(formatter)
+        main_handler.addFilter(rank_filter)
 
         stream_handler = logging.StreamHandler()
         stream_handler.setFormatter(formatter)
+        stream_handler.addFilter(rank_filter)
 
-        logger.addHandler(file_handler)
+        logger.addHandler(main_handler)
         logger.addHandler(stream_handler)
-    else:
-        logger.addHandler(logging.NullHandler())
 
     return logger
 
@@ -83,39 +133,6 @@ def save_history_mat(path, key, values):
     if scipy is None:
         return
     scipy.io.savemat(path, mdict={key: values})
-
-
-def set_optimizer_lr(optimizer, lr):
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
-
-
-def get_epoch_schedule(epoch_index, base_lr):
-    epoch_id = epoch_index + 1
-
-    if epoch_id <= 15:
-        return {
-            "stage_name": "WarmupAndBaseFit",
-            "phase_desc": "[L1+TV | LR=1e-4 | Epoch 1-15]",
-            "lr": base_lr,
-        }
-    if epoch_id <= 25:
-        return {
-            "stage_name": "StructureStabilize",
-            "phase_desc": "[L1+TV | LR=5e-5 | Epoch 16-25]",
-            "lr": base_lr * 0.5,
-        }
-    if epoch_id <= 35:
-        return {
-            "stage_name": "Finetune",
-            "phase_desc": "[L1+TV | LR=1e-5 | Epoch 26-35]",
-            "lr": base_lr * 0.1,
-        }
-    return {
-        "stage_name": "ExtremeConverge",
-        "phase_desc": "[L1+TV | LR=1e-6 | Epoch 36+]",
-        "lr": base_lr * 0.01,
-    }
 
 
 def is_dist_initialized():
@@ -134,7 +151,16 @@ def get_rank():
     return dist.get_rank() if is_dist_initialized() else 0
 
 
+def get_current_lr(optimizer):
+    return optimizer.param_groups[0]["lr"]
+
+
 def reduce_average(sum_value, count_value, device):
+    """
+    将各 rank 的统计量做 all_reduce，再得到全局平均值。
+    SAR 序列训练里需要按全局样本口径汇总 PSNR / SSIM / loss。
+    """
+
     if not is_dist_initialized():
         return sum_value / max(count_value, 1)
 
@@ -144,6 +170,11 @@ def reduce_average(sum_value, count_value, device):
 
 
 def broadcast_flags(flags, device):
+    """
+    将主进程上的停止标记广播给所有 rank。
+    这样早停触发后，各个训练进程能一致退出。
+    """
+
     tensor = torch.tensor(flags, dtype=torch.int64, device=device)
     if is_dist_initialized():
         dist.broadcast(tensor, src=0)
@@ -151,6 +182,15 @@ def broadcast_flags(flags, device):
 
 
 def init_runtime(args):
+    """
+    标准 DDP 初始化顺序：
+    1. 先解析 rank / local_rank
+    2. 先绑定当前进程对应 GPU
+    3. 再初始化 process group
+
+    这个顺序对多卡更稳，尤其是当前 AutoDL vGPU 环境。
+    """
+
     requested_gpu_ids = parse_gpu_ids(args.gpu_ids)
     use_cuda = torch.cuda.is_available()
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -159,9 +199,8 @@ def init_runtime(args):
     if distributed:
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
-        dist.init_process_group(backend="nccl", init_method="env://")
-
         visible_gpu_count = torch.cuda.device_count()
+
         if requested_gpu_ids is None:
             if local_rank >= visible_gpu_count:
                 raise ValueError(
@@ -182,6 +221,7 @@ def init_runtime(args):
 
         torch.cuda.set_device(device_id)
         device = torch.device(f"cuda:{device_id}")
+        dist.init_process_group(backend=args.dist_backend, init_method="env://")
         device_ids = [device_id]
     elif use_cuda:
         visible_gpu_count = torch.cuda.device_count()
@@ -194,6 +234,7 @@ def init_runtime(args):
                     f"Invalid --gpu-ids {invalid_gpu_ids}; visible GPU ids are 0 to {visible_gpu_count - 1}."
                 )
             device_ids = requested_gpu_ids
+
         device = torch.device(f"cuda:{device_ids[0]}")
         rank = 0
         local_rank = 0
@@ -222,13 +263,15 @@ def cleanup_distributed():
 
 
 def main():
-    model_name = "PST_UNet_MaskAware"
+    logger = None
+
+    model_name = "PST_UNet"
     dataset_name = "Sequence_Dataset_AzimuthMix"
     loss_name = "L1+TV"
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-dir", type=str, default=r"G:\VSCODE-G\PST_Dataset")
-    parser.add_argument("--domain", type=str, default="DB", choices=["DB", "Linear"])
+    parser.add_argument("--domain", type=str, default="Linear", choices=["Linear"])
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-val", type=float, default=255.0)
     parser.add_argument(
@@ -241,6 +284,13 @@ def main():
     parser.add_argument("--tv-weight", type=float, default=1e-3)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
+        "--dist-backend",
+        type=str,
+        default="nccl",
+        choices=["nccl", "gloo"],
+        help="DDP backend. On AutoDL vGPU, gloo can be used as a stable fallback.",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=2,
@@ -252,7 +302,7 @@ def main():
         "--grad-accum-steps",
         type=int,
         default=4,
-        help="Number of steps to accumulate gradients before updating. Global Batch Size = batch-size * WORLD_SIZE * grad-accum-steps.",
+        help="Number of steps to accumulate gradients before updating. Global batch size = batch-size * WORLD_SIZE * grad-accum-steps.",
     )
     args = parser.parse_args()
 
@@ -264,7 +314,7 @@ def main():
     world_size = runtime["world_size"]
 
     file_name = (
-        "Model({:s})-Dataset({:s})-Loss({:s}+tv{:f})-Epochs{:d}-Batch_size{:d}-lr{:f}".format(
+        "Model({:s})-Dataset({:s})-Loss({:s}+tv{:f})-Epochs{:d}-Batch_size{:d}-lr{:f}-domain{:s}".format(
             model_name,
             dataset_name,
             loss_name,
@@ -272,16 +322,20 @@ def main():
             args.num_epochs,
             args.batch_size,
             args.lr,
+            args.domain,
         )
     )
 
     args.outputs_dir = os.path.join(args.outputs_dir, file_name)
     os.makedirs(args.outputs_dir, exist_ok=True)
 
-    logger = setup_logger(args.outputs_dir, is_main_process())
+    fatal_log_path = enable_fault_logging(args.outputs_dir, runtime["rank"])
+    logger = setup_logger(args.outputs_dir, is_main_process(), runtime["rank"])
+
     logger.info("=" * 50)
     logger.info(f"Start training job: {file_name}")
     logger.info(f"Arguments: {vars(args)}")
+    logger.info(f"Fatal trace log: {fatal_log_path}")
     logger.info("=" * 50)
 
     if scipy is None:
@@ -294,16 +348,23 @@ def main():
 
         if distributed:
             logger.info(
-                f"Runtime: DDP | rank={get_rank()} | world_size={world_size} | local device={device} | visible selection={gpu_desc}"
+                f"Runtime: DDP | backend={args.dist_backend} | rank={get_rank()} | "
+                f"world_size={world_size} | local_rank={runtime['local_rank']} | "
+                f"device={device} | selected GPUs: {gpu_desc}"
             )
-            logger.info(f"Global batch size: {args.batch_size * world_size} ({args.batch_size} per process)")
+            logger.info(
+                f"Global batch size: {args.batch_size * world_size * args.grad_accum_steps} "
+                f"({args.batch_size} per process, grad_accum_steps={args.grad_accum_steps})"
+            )
         else:
             logger.info(
-                f"Runtime: {'DataParallel' if len(device_ids) > 1 else 'Single GPU'} | device={device} | selected GPUs: {gpu_desc}"
+                f"Runtime: {'DataParallel' if len(device_ids) > 1 else 'Single GPU'} | "
+                f"device={device} | selected GPUs: {gpu_desc}"
             )
     else:
         logger.info(f"Runtime: CPU | device={device}")
 
+    # 构建 SAR 序列恢复模型与损失函数。
     model = PST_UNet(in_channels=2, out_channels=1, base_dim=64)
     criterion = Seq_SAR_L1TVLoss(tv_weight=args.tv_weight)
     wrapped_model = TrainModelWrapper(model, criterion).to(device)
@@ -311,15 +372,15 @@ def main():
     if distributed:
         wrapped_model = DistributedDataParallel(
             wrapped_model,
-            device_ids=[device.index],
-            output_device=device.index,
+            device_ids=[device.index] if use_cuda else None,
+            output_device=device.index if use_cuda else None,
             broadcast_buffers=False,
         )
     elif len(device_ids) > 1:
         wrapped_model = DataParallel(
             wrapped_model,
             device_ids=device_ids,
-            output_device=device_ids[0]
+            output_device=device_ids[0],
         )
 
     amp_enabled = use_cuda
@@ -330,12 +391,20 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     ssim_calculator = SSIMLoss().to(device)
 
+    # 使用纯余弦退火学习率：
+    # - 起点保持为 --lr
+    # - 终点 eta_min 固定为 1e-6，和此前后期小学习率量级一致
+    # - T_max 绑定总 epoch 数，因此改 shell 中的 NUM_EPOCHS 会同步改变余弦周期长度
     base_lr = args.lr
     optimizer = optim.AdamW(model.parameters(), lr=base_lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(args.num_epochs, 1),
+        eta_min=1e-6,
+    )
 
     early_stopping = EarlyStopping(args.patience, verbose=False)
-    model_save_path = os.path.join(args.outputs_dir, "best_early_stopping.pth")
-    early_stopping.path = model_save_path
+    early_stopping.path = os.path.join(args.outputs_dir, "best_early_stopping.pth")
 
     dataloader_kwargs = {
         "num_workers": args.num_workers,
@@ -370,6 +439,12 @@ def main():
     )
 
     logger.info(f"Dataset ready. Train samples: {len(train_dataset)}, Eval samples: {len(eval_dataset)}")
+    logger.info(
+        "LR scheduler: CosineAnnealingLR | base_lr: %.2e | eta_min: %.2e | T_max: %d",
+        base_lr,
+        1e-6,
+        max(args.num_epochs, 1),
+    )
 
     best_weights = copy.deepcopy(model.state_dict())
     best_epoch = 0
@@ -387,9 +462,7 @@ def main():
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        schedule = get_epoch_schedule(epoch, base_lr)
-        set_optimizer_lr(optimizer, schedule["lr"])
-        phase_desc = schedule["phase_desc"]
+        current_lr = get_current_lr(optimizer)
 
         wrapped_model.train()
         epoch_losses = AverageMeter()
@@ -397,7 +470,7 @@ def main():
         progress = None
         if is_main_process():
             progress = tqdm(total=len(train_dataloader) * args.batch_size)
-            progress.set_description(f"epoch: {epoch}/{args.num_epochs - 1} {phase_desc}")
+            progress.set_description(f"epoch: {epoch}/{args.num_epochs - 1} [Cosine LR={current_lr:.2e}]")
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -406,9 +479,9 @@ def main():
             targets = targets.to(device, non_blocking=use_cuda)
 
             is_accumulating = (i + 1) % args.grad_accum_steps != 0 and (i + 1) != len(train_dataloader)
-            context = wrapped_model.no_sync() if (is_accumulating and distributed) else nullcontext()
+            sync_context = wrapped_model.no_sync() if (is_accumulating and distributed) else nullcontext()
 
-            with context:
+            with sync_context:
                 with autocast_context():
                     loss = wrapped_model(inputs, targets)
                     if loss.ndim > 0:
@@ -463,6 +536,7 @@ def main():
         epoch_ssim_avg = reduce_average(epoch_ssim.sum, epoch_ssim.count, device)
 
         current_score = epoch_psnr_avg
+        scheduler.step()
 
         should_stop = [0]
         if is_main_process():
@@ -487,16 +561,16 @@ def main():
 
             early_stopping(-current_score, model)
             if early_stopping.early_stop:
-                logger.warning("Early stopping triggered. Stop training with the current staged LR schedule.")
+                logger.warning("Early stopping triggered. Stop training under cosine annealing schedule.")
                 should_stop[0] = 1
 
             te = time.time()
             logger.info(
-                "Epoch [{}/{}] | stage: {} | lr: {:.2e} | train loss: {:.6f} | eval psnr: {:.4f} | eval ssim: {:.4f} | psnr_score: {:.4f} | Time: {:.2f}s".format(
+                "Epoch [{}/{}] | scheduler: cosine | lr: {:.2e} | train loss: {:.6f} | "
+                "eval psnr: {:.4f} | eval ssim: {:.4f} | psnr_score: {:.4f} | Time: {:.2f}s".format(
                     epoch,
                     args.num_epochs - 1,
-                    schedule["stage_name"],
-                    schedule["lr"],
+                    current_lr,
                     train_loss_avg,
                     epoch_psnr_avg,
                     epoch_ssim_avg,
@@ -517,4 +591,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        logger = logging.getLogger("TrainLogger")
+        exc_text = traceback.format_exc()
+
+        if logger.handlers:
+            logger.error("Unhandled exception in training process.")
+            logger.error(exc_text)
+        else:
+            sys.stderr.write("Unhandled exception before logger initialization.\n")
+            sys.stderr.write(exc_text)
+
+        raise

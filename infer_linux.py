@@ -21,43 +21,43 @@ from model import PST_UNet
 from utils import SSIMLoss, calc_psnr
 
 
-class DBInferenceDataset(Dataset):
+class LinearInferenceDataset(Dataset):
     def __init__(self, base_dir, max_val=255.0, num_samples=None, seed=42):
         self.base_dir = base_dir
         self.max_val = max_val
-        self.dataset = SARDataset(base_dir=base_dir, domain="DB", mode="test", max_val=max_val)
-        self.db_dir = self.dataset.data_dir
-        all_db_paths = list(self.dataset.file_paths)
+        self.dataset = SARDataset(base_dir=base_dir, domain="Linear", mode="test", max_val=max_val)
+        self.linear_dir = self.dataset.data_dir
+        all_linear_paths = list(self.dataset.file_paths)
 
         if num_samples is not None:
-            self.db_paths = self._sample_db_paths(all_db_paths, num_samples=num_samples, seed=seed)
+            self.linear_paths = self._sample_linear_paths(all_linear_paths, num_samples=num_samples, seed=seed)
         else:
-            self.db_paths = all_db_paths
+            self.linear_paths = all_linear_paths
 
-        self.dataset.file_paths = self.db_paths
+        self.dataset.file_paths = self.linear_paths
 
     def __len__(self):
-        return len(self.db_paths)
+        return len(self.linear_paths)
 
     @staticmethod
-    def _get_prefix(db_path):
-        db_name = os.path.basename(db_path)
-        if "_DB_seq_" not in db_name:
-            raise ValueError(f"DB file name does not match expected pattern '*_DB_seq_*.mat': {db_name}")
-        return db_name.split("_DB_seq_")[0]
+    def _get_prefix(linear_path):
+        linear_name = os.path.basename(linear_path)
+        if "_L_seq_" not in linear_name:
+            raise ValueError(f"Linear file name does not match expected pattern '*_L_seq_*.mat': {linear_name}")
+        return linear_name.split("_L_seq_")[0]
 
-    def _sample_db_paths(self, all_db_paths, num_samples, seed):
+    def _sample_linear_paths(self, all_linear_paths, num_samples, seed):
         if num_samples < 1:
             raise ValueError("--num-samples must be >= 1 when provided")
-        if num_samples > len(all_db_paths):
+        if num_samples > len(all_linear_paths):
             raise ValueError(
-                f"--num-samples={num_samples} exceeds available DB test samples ({len(all_db_paths)})."
+                f"--num-samples={num_samples} exceeds available Linear test samples ({len(all_linear_paths)})."
             )
 
         grouped_paths = {}
-        for db_path in all_db_paths:
-            prefix = self._get_prefix(db_path)
-            grouped_paths.setdefault(prefix, []).append(db_path)
+        for linear_path in all_linear_paths:
+            prefix = self._get_prefix(linear_path)
+            grouped_paths.setdefault(prefix, []).append(linear_path)
 
         num_groups = len(grouped_paths)
         if num_samples < num_groups:
@@ -83,27 +83,29 @@ class DBInferenceDataset(Dataset):
         return sorted(selected_paths)
 
     def __getitem__(self, idx):
-        db_path = self.db_paths[idx]
-        db_name = os.path.basename(db_path)
+        linear_path = self.linear_paths[idx]
+        linear_name = os.path.basename(linear_path)
         input_tensor, target_tensor = self.dataset[idx]
-        return input_tensor, target_tensor, db_name
+        return input_tensor, target_tensor, linear_name
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="PST-UNet DB-only inference script for Linux")
+    parser = argparse.ArgumentParser(description="PST-UNet Linear-only inference script for Linux")
     default_checkpoint = (
-        "./output/Model(PST_UNet_MaskAware)-Dataset(Sequence_Dataset_AzimuthMix)-Loss(L1+TV+tv0.002000)-Epochs40-Batch_size2-lr0.000100/best.pth"
+        "./output/Model(PST_UNet)-Dataset(Sequence_Dataset_AzimuthMix)-Loss(L1+TV+tv0.002000)-Epochs80-Batch_size1-lr0.000100-domainLinear/best.pth"
     )
     parser.add_argument("--checkpoint", type=str, default=default_checkpoint, help="Path to a model state_dict checkpoint.")
-    parser.add_argument("--base-dir", type=str, default="/root/autodl-tmp/Sequence_Dataset_AzimuthMix_q3_rt_only")
-    parser.add_argument("--output-dir", type=str, default="./inference_output/db_test")
+    dataset_path = "/root/autodl-tmp/Sequence_Dataset_AzimuthMix_q3_rt_only"
+    parser.add_argument("--base-dir", type=str, default=dataset_path, help="Root directory of the dataset, e.g., /root/autodl-tmp/Sequence_Dataset_AzimuthMix_q3_rt_only")
+    save_dir = "./inference_output/linear_test_" + os.path.basename(dataset_path.rstrip("/\\")).replace('Sequence_Dataset_', '').replace('_rt_only', '')
+    parser.add_argument("--output-dir", type=str, default=save_dir)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(
         "--num-samples",
         type=int,
         default=None,
-        help="Randomly sample N DB test files for inference. If not set, infer all DB test files.",
+        help="Randomly sample N Linear test files for inference. If not set, infer all Linear test files.",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed used when --num-samples is provided.")
     parser.add_argument("--max-val", type=float, default=255.0)
@@ -152,14 +154,14 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     predictions_dir = Path(args.output_dir) / "predictions"
 
-    dataset = DBInferenceDataset(
+    dataset = LinearInferenceDataset(
         base_dir=args.base_dir,
         max_val=args.max_val,
         num_samples=args.num_samples,
         seed=args.seed,
     )
     if len(dataset) == 0:
-        raise RuntimeError(f"No .mat files found for inference under {dataset.db_dir}.")
+        raise RuntimeError(f"No .mat files found for inference under {dataset.linear_dir}.")
 
     dataloader_kwargs = {
         "batch_size": args.batch_size,
@@ -230,8 +232,8 @@ def main():
                     }
                 )
 
-                mat_pred_db = outputs_cpu[local_idx, 0].numpy().transpose(1, 2, 0).astype(np.float32, copy=False)
-                save_prediction_file(predictions_dir / file_name, {"seq_pred_DB": mat_pred_db})
+                mat_pred_linear = outputs_cpu[local_idx, 0].numpy().transpose(1, 2, 0).astype(np.float32, copy=False)
+                save_prediction_file(predictions_dir / file_name, {"seq_pred_Linear": mat_pred_linear})
 
             progress.set_postfix(
                 psnr=f"{(sum(batch_psnr_values) / max(len(batch_psnr_values), 1)):.2f}",
@@ -250,7 +252,7 @@ def main():
     summary = {
         "checkpoint": os.path.abspath(args.checkpoint),
         "base_dir": os.path.abspath(args.base_dir),
-        "domain": "DB",
+        "domain": "Linear",
         "mode": "test",
         "sampled": args.num_samples is not None,
         "requested_num_samples": args.num_samples,
@@ -260,8 +262,8 @@ def main():
         "mean_ssim": mean_ssim,
         "predictions_dir": str(predictions_dir.resolve()),
         "prediction_format": "mat",
-        "saved_keys": ["seq_pred_DB"],
-        "sample_prefixes": sorted({dataset._get_prefix(path) for path in dataset.db_paths}),
+        "saved_keys": ["seq_pred_Linear"],
+        "sample_prefixes": sorted({dataset._get_prefix(path) for path in dataset.linear_paths}),
     }
 
     summary_path = Path(args.output_dir) / "summary.json"

@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class SARDataset(Dataset):
-    def __init__(self, base_dir, domain='DB', mode='train', max_val=255.0):
+    def __init__(self, base_dir, domain='Linear', mode='train', max_val=255.0):
         """
         SAR 序列数据集加载器（适配新的 AzimuthMix 序列数据集）
 

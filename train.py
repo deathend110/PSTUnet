@@ -262,6 +262,22 @@ def cleanup_distributed():
         dist.destroy_process_group()
 
 
+def raise_non_finite_training_error(logger, epoch, batch_idx, rank, tensor_name, tensor_value):
+    """
+    训练期非有限值防线：
+    一旦输入、输出或 loss 中出现 NaN/Inf，立即记录上下文并中止当前训练，
+    避免继续执行 optimizer.step() 污染整套 SAR 序列恢复权重。
+    """
+
+    logger.error(
+        f"Non-finite {tensor_name} detected | epoch={epoch} | batch={batch_idx} | rank={rank}"
+    )
+    logger.error(f"{tensor_name} stats: min={tensor_value.min().item():.6f}, max={tensor_value.max().item():.6f}")
+    raise FloatingPointError(
+        f"Non-finite {tensor_name} detected at epoch={epoch}, batch={batch_idx}, rank={rank}."
+    )
+
+
 def main():
     logger = None
 
@@ -367,7 +383,7 @@ def main():
 
     # 构建 SAR 序列恢复模型与损失函数。
     model = PST_UNet(in_channels=2, out_channels=1, base_dim=64)
-    criterion = Seq_SAR_L1TVLoss(tv_weight=args.tv_weight)
+    criterion = Seq_SAR_L1TVLoss(tv_weight=args.tv_weight).to(device)
     wrapped_model = TrainModelWrapper(model, criterion).to(device)
 
     if distributed:
@@ -479,15 +495,34 @@ def main():
             inputs = inputs.to(device, non_blocking=use_cuda)
             targets = targets.to(device, non_blocking=use_cuda)
 
+            if not torch.isfinite(inputs).all():
+                raise_non_finite_training_error(logger, epoch, i, get_rank(), "inputs", inputs)
+            if not torch.isfinite(targets).all():
+                raise_non_finite_training_error(logger, epoch, i, get_rank(), "targets", targets)
+
             is_accumulating = (i + 1) % args.grad_accum_steps != 0 and (i + 1) != len(train_dataloader)
             sync_context = wrapped_model.no_sync() if (is_accumulating and distributed) else nullcontext()
 
             with sync_context:
                 with autocast_context():
-                    loss = wrapped_model(inputs, targets)
-                    if loss.ndim > 0:
-                        loss = loss.mean()
-                    scaled_loss = loss / args.grad_accum_steps
+                    outputs = wrapped_model(inputs)
+                if not torch.isfinite(outputs).all():
+                    raise_non_finite_training_error(logger, epoch, i, get_rank(), "outputs", outputs)
+
+                # 对 SAR 序列 L1 + TV loss 显式切回 FP32 计算。
+                # 模型前向继续使用 AMP 提升吞吐，但 TV 的平方与求和避免在半精度下溢出。
+                loss = criterion(outputs.float(), targets.float())
+                if loss.ndim > 0:
+                    loss = loss.mean()
+                if not torch.isfinite(loss):
+                    logger.error(
+                        f"Non-finite loss detected | epoch={epoch} | batch={i} | rank={get_rank()}"
+                    )
+                    raise FloatingPointError(
+                        f"Non-finite loss detected at epoch={epoch}, batch={i}, rank={get_rank()}."
+                    )
+
+                scaled_loss = loss / args.grad_accum_steps
 
                 scaler.scale(scaled_loss).backward()
 

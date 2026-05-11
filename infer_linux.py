@@ -23,6 +23,7 @@ from utils import SSIMLoss, calc_psnr
 
 class LinearInferenceDataset(Dataset):
     def __init__(self, base_dir, max_val=255.0, num_samples=None, seed=42):
+        # 记录 Linear 域测试集根目录与归一化尺度，供 SAR 序列推理复用
         self.base_dir = base_dir
         self.max_val = max_val
         self.dataset = SARDataset(base_dir=base_dir, domain="Linear", mode="test", max_val=max_val)
@@ -83,10 +84,12 @@ class LinearInferenceDataset(Dataset):
         return sorted(selected_paths)
 
     def __getitem__(self, idx):
+        # 这里显式返回数据集原始索引，后续即使使用多 batch 推理，
+        # 也能保证指标表与保存结果严格对应测试集顺序
         linear_path = self.linear_paths[idx]
         linear_name = os.path.basename(linear_path)
         input_tensor, target_tensor = self.dataset[idx]
-        return input_tensor, target_tensor, linear_name
+        return input_tensor, target_tensor, linear_name, idx
 
 
 def parse_args():
@@ -182,7 +185,8 @@ def main():
     ssim_calculator = SSIMLoss().to(device)
     autocast_context = (lambda: torch.amp.autocast(device_type="cuda", enabled=True)) if use_cuda else nullcontext
 
-    metric_rows = []
+    # 预先按数据集长度分配指标槽位，保证 CSV 输出顺序与测试集顺序完全一致
+    metric_rows = [None] * len(dataset)
     total_psnr = 0.0
     total_ssim = 0.0
     total_samples = 0
@@ -190,7 +194,9 @@ def main():
     with torch.no_grad():
         progress = tqdm(dataloader, desc="Infer", total=len(dataloader))
         for batch_idx, batch in enumerate(progress):
-            inputs, targets, file_names = batch
+            # file_names 与 sample_indices 都由 DataLoader 按 shuffle=False 的顺序组 batch，
+            # 因此多 batch 只影响吞吐，不会改变 SAR 序列样本的保存顺序
+            inputs, targets, file_names, sample_indices = batch
 
             inputs = inputs.to(device, non_blocking=use_cuda)
             targets = targets.to(device, non_blocking=use_cuda)
@@ -207,7 +213,9 @@ def main():
             batch_ssim_values = []
 
             for local_idx, file_name in enumerate(file_names):
-                sample_index = batch_idx * args.batch_size + local_idx
+                # 直接使用数据集返回的原始索引，而不是由 batch 位置反推，
+                # 这样最后一个不完整 batch 或未来更换 collate 方式时也不会错位
+                sample_index = int(sample_indices[local_idx])
 
                 pred_2d_sample = outputs_cpu[local_idx].transpose(0, 1).contiguous()
                 tgt_2d_sample = targets_cpu[local_idx].transpose(0, 1).contiguous()
@@ -223,14 +231,12 @@ def main():
                 total_ssim += sample_ssim
                 total_samples += 1
 
-                metric_rows.append(
-                    {
-                        "index": sample_index,
-                        "file_name": file_name,
-                        "psnr": sample_psnr,
-                        "ssim": sample_ssim,
-                    }
-                )
+                metric_rows[sample_index] = {
+                    "index": sample_index,
+                    "file_name": file_name,
+                    "psnr": sample_psnr,
+                    "ssim": sample_ssim,
+                }
 
                 mat_pred_linear = outputs_cpu[local_idx, 0].numpy().transpose(1, 2, 0).astype(np.float32, copy=False)
                 save_prediction_file(predictions_dir / file_name, {"seq_pred_Linear": mat_pred_linear})

@@ -5,11 +5,10 @@ clear; clc; close all;
 % ==========================================
 script_dir = fileparts(mfilename('fullpath'));
 
-pred_dir = fullfile(script_dir, 'db_test', 'predictions');
+pred_dir = fullfile(script_dir, 'linear_test_AzimuthMix_q3', 'predictions');
 meta_dir = fullfile(script_dir, 'TH');
 
 dataset_root = 'G:\MATLAB-G\SAR Full PSF\Sequence_Dataset_AzimuthMix_q3_rt_only';
-DB_dir = fullfile(dataset_root, 'DB', 'testdata');
 Linear_dir = fullfile(dataset_root, 'Linear', 'testdata');
 
 group_names = {'High', 'Mixed', 'Low'};
@@ -28,10 +27,10 @@ if isempty(pred_files)
     error('No prediction .mat files found under: %s', pred_dir);
 end
 
-sum_psnr_in_db = zeros(1, numel(group_ids));
-sum_ssim_in_db = zeros(1, numel(group_ids));
-sum_psnr_pred_db = zeros(1, numel(group_ids));
-sum_ssim_pred_db = zeros(1, numel(group_ids));
+% sum_psnr_in_db = zeros(1, numel(group_ids));
+% sum_ssim_in_db = zeros(1, numel(group_ids));
+% sum_psnr_pred_db = zeros(1, numel(group_ids));
+% sum_ssim_pred_db = zeros(1, numel(group_ids));
 
 sum_psnr_in_lin = zeros(1, numel(group_ids));
 sum_ssim_in_lin = zeros(1, numel(group_ids));
@@ -40,10 +39,10 @@ sum_ssim_pred_lin = zeros(1, numel(group_ids));
 
 group_counts = zeros(1, numel(group_ids));
 
-sum_psnr_in_db_by_frame = [];
-sum_ssim_in_db_by_frame = [];
-sum_psnr_pred_db_by_frame = [];
-sum_ssim_pred_db_by_frame = [];
+% sum_psnr_in_db_by_frame = [];
+% sum_ssim_in_db_by_frame = [];
+% sum_psnr_pred_db_by_frame = [];
+% sum_ssim_pred_db_by_frame = [];
 
 sum_psnr_in_lin_by_frame = [];
 sum_ssim_in_lin_by_frame = [];
@@ -62,23 +61,17 @@ fprintf('%s\n', repmat('=', 1, 72));
 for file_idx = 1:length(pred_files)
     filename_ext = pred_files(file_idx).name;
     pred_filepath = fullfile(pred_dir, filename_ext);
-    DB_filepath = fullfile(DB_dir, filename_ext);
-    filename_linear = replace(filename_ext, '_DB_', '_L_');
-    Linear_filepath = fullfile(Linear_dir, filename_linear);
+    Linear_filepath = fullfile(Linear_dir, filename_ext);
     [~, filename, ~] = fileparts(pred_filepath);
 
     fprintf('[%d/%d] Processing sequence: %s\n', file_idx, length(pred_files), filename);
 
-    if ~exist(DB_filepath, 'file')
-        warning('Missing DB file, skip: %s', DB_filepath);
-        continue;
-    end
     if ~exist(Linear_filepath, 'file')
         warning('Missing Linear file, skip: %s', Linear_filepath);
         continue;
     end
 
-    parts = strsplit(filename, '_DB_seq_');
+    parts = strsplit(filename, '_L_seq_');
     core_name = append('SAR_Dataset_', parts{1});
     meta_filepath = fullfile(meta_dir, [core_name, '.mat']);
     if ~exist(meta_filepath, 'file')
@@ -89,40 +82,40 @@ for file_idx = 1:length(pred_files)
     meta_data = load(meta_filepath);
     pred_data = load(pred_filepath);
 
-    seq_pred_DB = double(pred_data.seq_pred_DB);
-    
-    seq_GT_DB = double(h5read(DB_filepath, '/seq_GT')) / 255;
-
-    seq_input_DB = double(h5read(DB_filepath, '/seq_input')) / 255;
+    seq_pred_Linear = double(pred_data.seq_pred_Linear);
     
     seq_GT_Linear = double(h5read(Linear_filepath, '/seq_GT_L')) / 255;
     
     seq_input_Linear = double(h5read(Linear_filepath, '/seq_input_L')) / 255;
 
-    [seq_pred_DB, was_transposed, psnr_direct, psnr_transposed] = ...
-        align_prediction_orientation(seq_pred_DB, seq_GT_DB);
+    [seq_pred_Linear, was_transposed, psnr_direct, psnr_transposed] = ...
+        align_prediction_orientation(seq_pred_Linear, seq_GT_Linear);
     if was_transposed && file_idx == 1
         fprintf('Prediction orientation auto-corrected: direct %.4f dB, transposed %.4f dB\n', ...
             psnr_direct, psnr_transposed);
     end
     
-    frame_mode_id = double(h5read(DB_filepath, '/frame_mode_id'));
+    frame_mode_id = double(h5read(Linear_filepath, '/frame_mode_id'));
     frame_mode_id = reshape(frame_mode_id, 1, []);
+    
+    % t = seq_pred_Linear(:,:,1);
+    % imagesc(t);axis image;colorbar;
 
-    seq_pred_Linear_raw = sar_inverse_normalize_modality_advanced( ...
-        seq_pred_DB, meta_data.V_MAX_GT, meta_data.V_MIN_GT);
+    % seq_pred_Linear_raw = sar_inverse_normalize_modality_advanced( ...
+    %     seq_pred_Linear, meta_data.V_MAX_GT, meta_data.V_MIN_GT);
 
-    total_frames = size(seq_pred_DB, 3);
-    if isempty(sum_psnr_in_db_by_frame)
-        sum_psnr_in_db_by_frame = zeros(1, total_frames);
-        sum_ssim_in_db_by_frame = zeros(1, total_frames);
-        sum_psnr_pred_db_by_frame = zeros(1, total_frames);
-        sum_ssim_pred_db_by_frame = zeros(1, total_frames);
+    total_frames = size(seq_pred_Linear, 3);
+    if isempty(sum_psnr_in_lin_by_frame)
+        % sum_psnr_in_db_by_frame = zeros(1, total_frames);
+        % sum_ssim_in_db_by_frame = zeros(1, total_frames);
+        % sum_psnr_pred_db_by_frame = zeros(1, total_frames);
+        % sum_ssim_pred_db_by_frame = zeros(1, total_frames);
+
         sum_psnr_in_lin_by_frame = zeros(1, total_frames);
         sum_ssim_in_lin_by_frame = zeros(1, total_frames);
         sum_psnr_pred_lin_by_frame = zeros(1, total_frames);
         sum_ssim_pred_lin_by_frame = zeros(1, total_frames);
-    elseif numel(sum_psnr_in_db_by_frame) ~= total_frames
+    elseif numel(sum_psnr_in_lin_by_frame) ~= total_frames
         warning('Frame count mismatch in %s, skip this file.', filename_ext);
         continue;
     end
@@ -138,10 +131,10 @@ for file_idx = 1:length(pred_files)
         warning('Frame mode layout differs in %s. Plots use the first valid sequence as reference.', filename_ext);
     end
 
-    cur_psnr_in_db = zeros(1, total_frames);
-    cur_ssim_in_db = zeros(1, total_frames);
-    cur_psnr_pred_db = zeros(1, total_frames);
-    cur_ssim_pred_db = zeros(1, total_frames);
+    % cur_psnr_in_db = zeros(1, total_frames);
+    % cur_ssim_in_db = zeros(1, total_frames);
+    % cur_psnr_pred_db = zeros(1, total_frames);
+    % cur_ssim_pred_db = zeros(1, total_frames);
 
     cur_psnr_in_lin = zeros(1, total_frames);
     cur_ssim_in_lin = zeros(1, total_frames);
@@ -149,33 +142,37 @@ for file_idx = 1:length(pred_files)
     cur_ssim_pred_lin = zeros(1, total_frames);
 
     for f = 1:total_frames
-        in_db = seq_input_DB(:, :, f);
-        pred_db = seq_pred_DB(:, :, f);
-        gt_db = seq_GT_DB(:, :, f);
-
+        % in_db = seq_input_DB(:, :, f);
+        % gt_db = seq_GT_DB(:, :, f);
+        
+        pred_lin = seq_pred_Linear(:, :, f);
         in_lin = seq_input_Linear(:, :, f);
         gt_lin = seq_GT_Linear(:, :, f);
-        pred_lin = minmaxnormalize_image( ...
-            seq_pred_Linear_raw(:, :, f), meta_data.V_MAX_GT_L, meta_data.V_MIN_GT_L);
+        % subplot(131);imagesc(pred_lin);axis image;colorbar;
+        % subplot(132);imagesc(in_lin);axis image;colorbar;
+        % subplot(133);imagesc(gt_lin);axis image;colorbar;
 
-        cur_psnr_in_db(f) = psnr(in_db, gt_db, 1.0);
-        cur_ssim_in_db(f) = ssim(in_db, gt_db);
-        cur_psnr_pred_db(f) = psnr(pred_db, gt_db, 1.0);
-        cur_ssim_pred_db(f) = ssim(pred_db, gt_db);
+        % pred_lin = minmaxnormalize_image( ...
+        %     seq_pred_Linear_raw(:, :, f), meta_data.V_MAX_GT_L, meta_data.V_MIN_GT_L);
+
+        % cur_psnr_in_db(f) = psnr(in_db, gt_db, 1.0);
+        % cur_ssim_in_db(f) = ssim(in_db, gt_db);
+        % cur_psnr_pred_db(f) = psnr(pred_db, gt_db, 1.0);
+        % cur_ssim_pred_db(f) = ssim(pred_db, gt_db);
 
         cur_psnr_in_lin(f) = psnr(in_lin, gt_lin, 1.0);
         cur_ssim_in_lin(f) = ssim(in_lin, gt_lin);
         cur_psnr_pred_lin(f) = psnr(pred_lin, gt_lin, 1.0);
         cur_ssim_pred_lin(f) = ssim(pred_lin, gt_lin);
-        subplot(121);imagesc(pred_lin); colormap(gca, 'gray'); axis image off;
-        subplot(122);imagesc(gt_lin); colormap(gca, 'gray'); axis image off;
+        % subplot(121);imagesc(pred_lin); colormap(gca, 'gray'); axis image off;
+        % subplot(122);imagesc(gt_lin); colormap(gca, 'gray'); axis image off;
         
         group_idx = map_frame_mode_to_group(frame_mode_id(f), group_ids);
         if group_idx > 0
-            sum_psnr_in_db(group_idx) = sum_psnr_in_db(group_idx) + cur_psnr_in_db(f);
-            sum_ssim_in_db(group_idx) = sum_ssim_in_db(group_idx) + cur_ssim_in_db(f);
-            sum_psnr_pred_db(group_idx) = sum_psnr_pred_db(group_idx) + cur_psnr_pred_db(f);
-            sum_ssim_pred_db(group_idx) = sum_ssim_pred_db(group_idx) + cur_ssim_pred_db(f);
+            % sum_psnr_in_db(group_idx) = sum_psnr_in_db(group_idx) + cur_psnr_in_db(f);
+            % sum_ssim_in_db(group_idx) = sum_ssim_in_db(group_idx) + cur_ssim_in_db(f);
+            % sum_psnr_pred_db(group_idx) = sum_psnr_pred_db(group_idx) + cur_psnr_pred_db(f);
+            % sum_ssim_pred_db(group_idx) = sum_ssim_pred_db(group_idx) + cur_ssim_pred_db(f);
 
             sum_psnr_in_lin(group_idx) = sum_psnr_in_lin(group_idx) + cur_psnr_in_lin(f);
             sum_ssim_in_lin(group_idx) = sum_ssim_in_lin(group_idx) + cur_ssim_in_lin(f);
@@ -186,10 +183,10 @@ for file_idx = 1:length(pred_files)
         end
     end
 
-    sum_psnr_in_db_by_frame = sum_psnr_in_db_by_frame + cur_psnr_in_db;
-    sum_ssim_in_db_by_frame = sum_ssim_in_db_by_frame + cur_ssim_in_db;
-    sum_psnr_pred_db_by_frame = sum_psnr_pred_db_by_frame + cur_psnr_pred_db;
-    sum_ssim_pred_db_by_frame = sum_ssim_pred_db_by_frame + cur_ssim_pred_db;
+    % sum_psnr_in_db_by_frame = sum_psnr_in_db_by_frame + cur_psnr_in_db;
+    % sum_ssim_in_db_by_frame = sum_ssim_in_db_by_frame + cur_ssim_in_db;
+    % sum_psnr_pred_db_by_frame = sum_psnr_pred_db_by_frame + cur_psnr_pred_db;
+    % sum_ssim_pred_db_by_frame = sum_ssim_pred_db_by_frame + cur_ssim_pred_db;
 
     sum_psnr_in_lin_by_frame = sum_psnr_in_lin_by_frame + cur_psnr_in_lin;
     sum_ssim_in_lin_by_frame = sum_ssim_in_lin_by_frame + cur_ssim_in_lin;
@@ -206,20 +203,20 @@ end
 %% ==========================================
 % 4. Average metrics
 % ==========================================
-avg_psnr_in_db = safe_divide(sum_psnr_in_db, group_counts);
-avg_ssim_in_db = safe_divide(sum_ssim_in_db, group_counts);
-avg_psnr_pred_db = safe_divide(sum_psnr_pred_db, group_counts);
-avg_ssim_pred_db = safe_divide(sum_ssim_pred_db, group_counts);
+% avg_psnr_in_db = safe_divide(sum_psnr_in_db, group_counts);
+% avg_ssim_in_db = safe_divide(sum_ssim_in_db, group_counts);
+% avg_psnr_pred_db = safe_divide(sum_psnr_pred_db, group_counts);
+% avg_ssim_pred_db = safe_divide(sum_ssim_pred_db, group_counts);
 
 avg_psnr_in_lin = safe_divide(sum_psnr_in_lin, group_counts);
 avg_ssim_in_lin = safe_divide(sum_ssim_in_lin, group_counts);
 avg_psnr_pred_lin = safe_divide(sum_psnr_pred_lin, group_counts);
 avg_ssim_pred_lin = safe_divide(sum_ssim_pred_lin, group_counts);
 
-avg_psnr_in_db_by_frame = sum_psnr_in_db_by_frame / valid_count;
-avg_ssim_in_db_by_frame = sum_ssim_in_db_by_frame / valid_count;
-avg_psnr_pred_db_by_frame = sum_psnr_pred_db_by_frame / valid_count;
-avg_ssim_pred_db_by_frame = sum_ssim_pred_db_by_frame / valid_count;
+% avg_psnr_in_db_by_frame = sum_psnr_in_db_by_frame / valid_count;
+% avg_ssim_in_db_by_frame = sum_ssim_in_db_by_frame / valid_count;
+% avg_psnr_pred_db_by_frame = sum_psnr_pred_db_by_frame / valid_count;
+% avg_ssim_pred_db_by_frame = sum_ssim_pred_db_by_frame / valid_count;
 
 avg_psnr_in_lin_by_frame = sum_psnr_in_lin_by_frame / valid_count;
 avg_ssim_in_lin_by_frame = sum_ssim_in_lin_by_frame / valid_count;
@@ -236,17 +233,17 @@ fprintf('%s\n', repmat('=', 1, 84));
 fprintf('Sequence evaluation summary (%d sequences, %d total frames)\n', valid_count, total_frames_all);
 fprintf('%s\n\n', repmat('=', 1, 84));
 
-fprintf('DB domain metrics\n');
-fprintf('------------------------------------------------------------------------------------\n');
-fprintf(' %-18s | %-12s | %-12s | %-12s\n', 'Metric \\ Group', group_names{1}, group_names{2}, group_names{3});
-fprintf('------------------------------------------------------------------------------------\n');
-fprintf(' %-18s | %10.2f dB | %10.2f dB | %10.2f dB\n', 'Input PSNR', avg_psnr_in_db(1), avg_psnr_in_db(2), avg_psnr_in_db(3));
-fprintf(' %-18s | %10.2f dB | %10.2f dB | %10.2f dB\n', 'Pred  PSNR', avg_psnr_pred_db(1), avg_psnr_pred_db(2), avg_psnr_pred_db(3));
-fprintf('------------------------------------------------------------------------------------\n');
-fprintf(' %-18s | %10.4f    | %10.4f    | %10.4f\n', 'Input SSIM', avg_ssim_in_db(1), avg_ssim_in_db(2), avg_ssim_in_db(3));
-fprintf(' %-18s | %10.4f    | %10.4f    | %10.4f\n', 'Pred  SSIM', avg_ssim_pred_db(1), avg_ssim_pred_db(2), avg_ssim_pred_db(3));
-fprintf(' %-18s | %10d    | %10d    | %10d\n', 'Frame Count', group_counts(1), group_counts(2), group_counts(3));
-fprintf('------------------------------------------------------------------------------------\n\n');
+% fprintf('DB domain metrics\n');
+% fprintf('------------------------------------------------------------------------------------\n');
+% fprintf(' %-18s | %-12s | %-12s | %-12s\n', 'Metric \\ Group', group_names{1}, group_names{2}, group_names{3});
+% fprintf('------------------------------------------------------------------------------------\n');
+% fprintf(' %-18s | %10.2f dB | %10.2f dB | %10.2f dB\n', 'Input PSNR', avg_psnr_in_db(1), avg_psnr_in_db(2), avg_psnr_in_db(3));
+% fprintf(' %-18s | %10.2f dB | %10.2f dB | %10.2f dB\n', 'Pred  PSNR', avg_psnr_pred_db(1), avg_psnr_pred_db(2), avg_psnr_pred_db(3));
+% fprintf('------------------------------------------------------------------------------------\n');
+% fprintf(' %-18s | %10.4f    | %10.4f    | %10.4f\n', 'Input SSIM', avg_ssim_in_db(1), avg_ssim_in_db(2), avg_ssim_in_db(3));
+% fprintf(' %-18s | %10.4f    | %10.4f    | %10.4f\n', 'Pred  SSIM', avg_ssim_pred_db(1), avg_ssim_pred_db(2), avg_ssim_pred_db(3));
+% fprintf(' %-18s | %10d    | %10d    | %10d\n', 'Frame Count', group_counts(1), group_counts(2), group_counts(3));
+% fprintf('------------------------------------------------------------------------------------\n\n');
 
 fprintf('Linear domain metrics\n');
 fprintf('------------------------------------------------------------------------------------\n');
@@ -270,7 +267,7 @@ ax1 = axes(fig_psnr);
 hold(ax1, 'on');
 
 yl1_tmp = [
-    avg_psnr_in_db_by_frame, avg_psnr_pred_db_by_frame, ...
+    % avg_psnr_in_db_by_frame, avg_psnr_pred_db_by_frame, ...
     avg_psnr_in_lin_by_frame, avg_psnr_pred_lin_by_frame
 ];
 ymin1 = min(yl1_tmp) - 0.5;
@@ -278,8 +275,8 @@ ymax1 = max(yl1_tmp) + 0.5;
 
 draw_mode_background(ax1, reference_frame_mode_id, ymin1, ymax1, group_ids, group_colors);
 
-plot(x, avg_psnr_in_db_by_frame, '-o', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Input DB PSNR');
-plot(x, avg_psnr_pred_db_by_frame, '-o', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Pred DB PSNR');
+% plot(x, avg_psnr_in_db_by_frame, '-o', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Input DB PSNR');
+% plot(x, avg_psnr_pred_db_by_frame, '-o', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Pred DB PSNR');
 plot(x, avg_psnr_in_lin_by_frame, '-s', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Input Linear PSNR');
 plot(x, avg_psnr_pred_lin_by_frame, '-s', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Pred Linear PSNR');
 
@@ -299,7 +296,7 @@ ax2 = axes(fig_ssim);
 hold(ax2, 'on');
 
 yl2_tmp = [
-    avg_ssim_in_db_by_frame, avg_ssim_pred_db_by_frame, ...
+    % avg_ssim_in_db_by_frame, avg_ssim_pred_db_by_frame, ...
     avg_ssim_in_lin_by_frame, avg_ssim_pred_lin_by_frame
 ];
 ymin2 = min(yl2_tmp) - 0.02;
@@ -307,8 +304,8 @@ ymax2 = max(yl2_tmp) + 0.02;
 
 draw_mode_background(ax2, reference_frame_mode_id, ymin2, ymax2, group_ids, group_colors);
 
-plot(x, avg_ssim_in_db_by_frame, '-o', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Input DB SSIM');
-plot(x, avg_ssim_pred_db_by_frame, '-o', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Pred DB SSIM');
+% plot(x, avg_ssim_in_db_by_frame, '-o', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Input DB SSIM');
+% plot(x, avg_ssim_pred_db_by_frame, '-o', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Pred DB SSIM');
 plot(x, avg_ssim_in_lin_by_frame, '-s', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Input Linear SSIM');
 plot(x, avg_ssim_pred_lin_by_frame, '-s', 'LineWidth', 1.5, 'MarkerSize', 4, 'DisplayName', 'Pred Linear SSIM');
 

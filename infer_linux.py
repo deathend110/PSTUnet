@@ -95,11 +95,11 @@ class LinearInferenceDataset(Dataset):
 def parse_args():
     parser = argparse.ArgumentParser(description="PST-UNet Linear-only inference script for Linux")
     default_checkpoint = (
-        "./output/Model(PST_UNet)-Dataset(Sequence_Dataset_AzimuthMix)-Loss(L1+TV+tv0.002000)-Epochs80-Batch_size1-lr0.000100-domainLinear/best.pth"
+        "./output/Model(PST_UNet)-Dataset(AzimuthMix_q7)-Loss(L1+TV+tv0.002000)-Epochs80-Batch_size1-lr0.000100-domainLinear/best.pth"
     )
     parser.add_argument("--checkpoint", type=str, default=default_checkpoint, help="Path to a model state_dict checkpoint.")
-    dataset_path = "/root/autodl-tmp/Sequence_Dataset_AzimuthMix_q3_rt_only"
-    parser.add_argument("--base-dir", type=str, default=dataset_path, help="Root directory of the dataset, e.g., /root/autodl-tmp/Sequence_Dataset_AzimuthMix_q3_rt_only")
+    dataset_path = "/root/autodl-tmp/Sequence_Dataset_AzimuthMix_q7_rt_only"
+    parser.add_argument("--base-dir", type=str, default=dataset_path, help="Root directory of the dataset, e.g., /root/autodl-tmp/Sequence_Dataset_AzimuthMix_q7_rt_only")
     save_dir = "./inference_output/linear_test_" + os.path.basename(dataset_path.rstrip("/\\")).replace('Sequence_Dataset_', '').replace('_rt_only', '')
     parser.add_argument("--output-dir", type=str, default=save_dir)
     parser.add_argument("--batch-size", type=int, default=1)

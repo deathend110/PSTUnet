@@ -52,14 +52,14 @@ NPROC_PER_NODE=2
 DIST_BACKEND="${DIST_BACKEND:-nccl}"
 
 # 梯度累积步数
-GRAD_ACCUM_STEPS=1
+GRAD_ACCUM_STEPS=2
 
 export OMP_NUM_THREADS=4
 
 # 这些环境变量主要用于 NCCL 排障。
 # 当前如果使用 gloo，它们基本不会参与训练流程，但保留也无妨。
 export NCCL_DEBUG=INFO
-export NCCL_P2P_DISABLE=1
+export NCCL_P2P_DISABLE=0
 export NCCL_IB_DISABLE=1
 export TORCH_NCCL_BLOCKING_WAIT=1
 
